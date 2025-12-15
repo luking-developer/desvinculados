@@ -4,7 +4,6 @@ services:
     plan: free 
     rootDir: ./
     env: python
-    pythonVersion: 3.11
     buildCommand: "pip install -r requirements.txt"
     startCommand: "streamlit run app.py --server.port $PORT --server.enableCORS false --server.enableXsrfProtection false"
     
