@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import io
+import uuid
 from datetime import datetime
 # Importamos las funciones de la lógica anterior
 # (normalizar_fecha, MONTH_MAPPING, TRUE_VALUES, etc.)
@@ -38,72 +39,68 @@ def normalizar_fecha(fecha_str):
 def cargar_db(uploaded_file):
     """Carga una base de datos SQLite existente a un Polars DataFrame en memoria."""
     
-    # 1. Crear una conexión EN MEMORIA
-    conn = sqlite3.connect(':memory:')
-    
-    # 2. Leer los bytes del archivo subido (el contenido binario de la DB)
-    db_bytes = uploaded_file.read()
-
-    # 3. Cargar el contenido binario del archivo a la conexión en memoria
-    # Usamos la función nativa backup para transferir el contenido
-    # de un archivo (simulado) a la DB en memoria.
-    
-    # Crear una conexión temporal al archivo subido usando el objeto BytesIO
-    # que es lo que fallaba, pero esta vez, usando un "truco" de sqlite
-    # El método connect acepta un camino al archivo. Si usamos un nombre falso, 
-    # necesitamos que el driver lo entienda, lo cual es muy complejo.
-    
-    # La manera limpia es usar la conexión en memoria y el método .executescript 
-    # con el volcado (dump) del archivo subido.
+    conn = None
+    conn_disk = None
+    temp_file_path = None
     
     try:
-        # A. Conexión temporal para leer el contenido (usando el objeto BytesIO)
-        # Esto requiere que el archivo subido se comporte como un archivo en disco, 
-        # lo cual es difícil en Python puro. La solución más fácil es:
+        # 1. Crear una ruta de archivo temporal única en el directorio /tmp de Render
+        # El directorio /tmp es el único que permite escritura en el plan gratuito
+        temp_file_path = f"/tmp/{uuid.uuid4()}.db"
         
-        # B. Escribir el objeto BytesIO a un archivo temporal para que SQLite lo pueda abrir
-        temp_file_path = f"/tmp/{uuid.uuid4()}.db" # Crear una ruta temporal única
-        
+        # 2. Leer los bytes del archivo subido
+        db_bytes = uploaded_file.read()
+
+        # 3. Escribir el objeto BytesIO (contenido de la DB) al archivo temporal en disco
         with open(temp_file_path, "wb") as f:
             f.write(db_bytes)
             
-        # C. Conectar a la base de datos temporal en disco
+        # 4. Conectar a la base de datos temporal en disco
+        # ¡IMPORTANTE!: Esto resuelve el error TypeError en la línea 45
         conn_disk = sqlite3.connect(temp_file_path)
         
-        # D. Transferir el contenido de la DB de disco a la DB en memoria (MÉTODO ROBUSTO)
+        # 5. Crear la conexión en memoria (la persistente para la sesión)
+        conn = sqlite3.connect(':memory:')
+
+        # 6. Transferir el contenido de la DB de disco a la DB en memoria (MÉTODO ROBUSTO)
         conn_disk.backup(conn)
         
-        # E. Leer datos de la DB en memoria
+        # 7. Leer datos de la DB en memoria usando Polars
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM desvinculados")
         data = cursor.fetchall()
         column_names = [description[0] for description in cursor.description]
         
         if not data:
-             st.warning("La tabla 'desvinculados' estaba vacía.")
-             df = pl.DataFrame({col: [] for col in column_names})
+             st.warning("La tabla 'desvinculados' estaba vacía o no existe.")
+             # Crear DataFrame vacío con esquema correcto
+             schema = {col: pl.Utf8 for col in column_names}
+             df = pl.DataFrame({}, schema=schema)
         else:
              df = pl.DataFrame(data, schema=column_names)
 
-        # Rellenar fecha_intervencion faltante
+        # 8. Rellenar y guardar estado
         df = df.with_columns(
             pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT))
         )
         
         st.session_state.data = df
         st.session_state.db_cargada = True
-        st.session_state.db_conn = conn # Guarda la conexión en memoria si es necesario después
         st.success(f"Base de datos cargada con {len(df)} registros usando Polars.")
         
     except sqlite3.OperationalError as e:
-        st.error(f"Error al leer la tabla 'desvinculados' del archivo DB. Archivo corrupto o esquema incorrecto: {e}")
+        st.error(f"Error al leer la tabla 'desvinculados'. El archivo podría estar corrupto o faltar la tabla: {e}")
+        st.session_state.db_cargada = False
+    except Exception as e:
+        st.error(f"Error inesperado al cargar la DB: {e}")
         st.session_state.db_cargada = False
     finally:
-        # F. Limpieza crítica: Cerrar conexiones temporales y eliminar el archivo temporal
-        if 'conn_disk' in locals():
+        # 9. Limpieza crítica: Cerrar conexiones temporales y eliminar el archivo temporal
+        if conn_disk:
              conn_disk.close()
-        if os.path.exists(temp_file_path):
+        if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        # La conexión 'conn' queda abierta en memoria, pero Streamlit la gestionará.
 
 def procesar_csv(uploaded_csv):
     """Procesa y normaliza el CSV, y lo fusiona con los datos existentes."""
