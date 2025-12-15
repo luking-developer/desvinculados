@@ -36,23 +36,74 @@ def normalizar_fecha(fecha_str):
     return None
 
 def cargar_db(uploaded_file):
-    """Crea una conexión SQLite in-memory a partir del archivo subido."""
-    st.session_state.db_conn = sqlite3.connect(':memory:')
+    """Carga una base de datos SQLite existente a un Polars DataFrame en memoria."""
     
-    # 1. Volcar el archivo subido a la conexión en memoria
+    # 1. Crear una conexión EN MEMORIA
+    conn = sqlite3.connect(':memory:')
+    
+    # 2. Leer los bytes del archivo subido (el contenido binario de la DB)
     db_bytes = uploaded_file.read()
-    with io.BytesIO(db_bytes) as file:
-        conn_disk = sqlite3.connect(file)
-        # Leer la tabla 'desvinculados' (asumo que es la única)
-        try:
-            df = pd.read_sql('SELECT * FROM desvinculados', conn_disk)
-            df['fecha_intervencion'] = df['fecha_intervencion'].fillna(datetime.now().strftime(DATE_FORMAT))
-            st.session_state.data = df
-            st.session_state.db_cargada = True
-            st.success(f"Base de datos cargada con {len(df)} registros.")
-        except Exception as e:
-            st.error(f"Error al leer la tabla 'desvinculados' del archivo DB. Archivo corrupto o esquema incorrecto: {e}")
-            st.session_state.db_cargada = False
+
+    # 3. Cargar el contenido binario del archivo a la conexión en memoria
+    # Usamos la función nativa backup para transferir el contenido
+    # de un archivo (simulado) a la DB en memoria.
+    
+    # Crear una conexión temporal al archivo subido usando el objeto BytesIO
+    # que es lo que fallaba, pero esta vez, usando un "truco" de sqlite
+    # El método connect acepta un camino al archivo. Si usamos un nombre falso, 
+    # necesitamos que el driver lo entienda, lo cual es muy complejo.
+    
+    # La manera limpia es usar la conexión en memoria y el método .executescript 
+    # con el volcado (dump) del archivo subido.
+    
+    try:
+        # A. Conexión temporal para leer el contenido (usando el objeto BytesIO)
+        # Esto requiere que el archivo subido se comporte como un archivo en disco, 
+        # lo cual es difícil en Python puro. La solución más fácil es:
+        
+        # B. Escribir el objeto BytesIO a un archivo temporal para que SQLite lo pueda abrir
+        temp_file_path = f"/tmp/{uuid.uuid4()}.db" # Crear una ruta temporal única
+        
+        with open(temp_file_path, "wb") as f:
+            f.write(db_bytes)
+            
+        # C. Conectar a la base de datos temporal en disco
+        conn_disk = sqlite3.connect(temp_file_path)
+        
+        # D. Transferir el contenido de la DB de disco a la DB en memoria (MÉTODO ROBUSTO)
+        conn_disk.backup(conn)
+        
+        # E. Leer datos de la DB en memoria
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM desvinculados")
+        data = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        
+        if not data:
+             st.warning("La tabla 'desvinculados' estaba vacía.")
+             df = pl.DataFrame({col: [] for col in column_names})
+        else:
+             df = pl.DataFrame(data, schema=column_names)
+
+        # Rellenar fecha_intervencion faltante
+        df = df.with_columns(
+            pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT))
+        )
+        
+        st.session_state.data = df
+        st.session_state.db_cargada = True
+        st.session_state.db_conn = conn # Guarda la conexión en memoria si es necesario después
+        st.success(f"Base de datos cargada con {len(df)} registros usando Polars.")
+        
+    except sqlite3.OperationalError as e:
+        st.error(f"Error al leer la tabla 'desvinculados' del archivo DB. Archivo corrupto o esquema incorrecto: {e}")
+        st.session_state.db_cargada = False
+    finally:
+        # F. Limpieza crítica: Cerrar conexiones temporales y eliminar el archivo temporal
+        if 'conn_disk' in locals():
+             conn_disk.close()
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
 def procesar_csv(uploaded_csv):
     """Procesa y normaliza el CSV, y lo fusiona con los datos existentes."""
