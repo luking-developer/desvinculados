@@ -1,5 +1,4 @@
 streamlit
 pandas
 polars
-sqlite3
 zipfile
