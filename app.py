@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import polars as p
+import polars as pl
 import sqlite3
 import io
 import os
