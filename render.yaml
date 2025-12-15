@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: desvinculados
+    plan: free 
+    rootDir: ./
+    env: python
+    pythonVersion: 3.11
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "streamlit run app.py --server.port $PORT --server.enableCORS false --server.enableXsrfProtection false"
+    
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: STREAMLIT_SERVER_PORT
+        value: "8501"
+        
+    healthCheckPath: /
+    
+    region: oregon
