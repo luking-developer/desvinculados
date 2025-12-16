@@ -1,7 +1,7 @@
 import streamlit as st
 import polars as pl
 import sqlite3
-import pandas as pd # Necesario para st.data_editor
+import pandas as pd
 import io
 import os 
 import re
@@ -75,8 +75,6 @@ def cargar_db(uploaded_file):
     temp_file_path = None
     
     db_bytes = uploaded_file.read()
-    # 🚨 CAMBIO DE REQUISITO: Remover el almacenamiento de db_bytes 
-    # para evitar la descarga del archivo original.
     
     try:
         temp_file_path = f"/tmp/{uuid.uuid4()}.db"
@@ -180,6 +178,7 @@ def guardar_db_bytes(df):
             database_driver='sqlite' 
         )
     except Exception:
+        # Fallback to Pandas if Polars DB writer fails (e.g. schema issues)
         df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
         
     # Transferir de DB en memoria a archivo binario para la descarga
@@ -215,22 +214,21 @@ with col1:
     db_file = st.file_uploader("Cargar Base de Datos Existente (.db)", type=['db', 'sqlite'])
     if db_file: 
         cargar_db(db_file)
-    # 🚨 BOTÓN DE DESCARGA ORIGINAL ELIMINADO SEGÚN REQUERIMIENTO DEL USUARIO
 
 with col2:
     csv_file = st.file_uploader("Cargar Archivo CSV para Nuevos Registros", type=['csv'])
     if csv_file:
         procesar_csv(csv_file)
         
-# --- Interfaz de Edición ---
+# --- Interfaz de ABM y Edición ---
 if len(st.session_state.data) > 0:
     
-    st.header(f"2. Edición de Registros ({len(st.session_state.data)} en memoria)")
+    st.header(f"2. Gestión de Registros ({len(st.session_state.data)} en memoria)")
     
-    # Conversión CRÍTICA: Polars a Pandas
+    # Conversión CRÍTICA: Polars (string dates) a Pandas (datetime dates)
     df_edit_pandas = st.session_state.data.to_pandas()
     
-    # CONVERSIÓN A DATETIME DE PANDAS (Necesario para el DateColumn)
+    # Aplicar conversión de tipo a datetime para que el DateColumn de Streamlit funcione
     try:
         df_edit_pandas['fecha_intervencion'] = pd.to_datetime(
             df_edit_pandas['fecha_intervencion'], format=DATE_FORMAT, errors='coerce'
@@ -242,15 +240,16 @@ if len(st.session_state.data) > 0:
     except Exception as e:
         st.error(f"Fallo grave al convertir columnas de fecha: {e}")
         
-    # Llenar valores NaT (inválidos) con la fecha de hoy para la interfaz
+    # Llenar valores NaT (inválidos o nulos) con la fecha de hoy para la interfaz
     hoy_datetime = datetime.now().date() 
     df_edit_pandas['fecha_intervencion'] = df_edit_pandas['fecha_intervencion'].fillna(hoy_datetime)
     df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(hoy_datetime)
     
-
+    # Configuración de columnas
     estado_config = st.column_config.SelectboxColumn("Estado", options=list(ESTADOS), required=True)
     fecha_config = st.column_config.DateColumn("Fecha Intervención", format=DATE_FORMAT, required=True)
 
+    # 🚨 ABM Interface: num_rows='dynamic' habilita Alta (Add row) y Baja (trash icon)
     edited_df_pandas = st.data_editor(
         df_edit_pandas,
         column_config={
@@ -258,22 +257,36 @@ if len(st.session_state.data) > 0:
             "fecha_intervencion": fecha_config
         },
         disabled=('nro_cli', 'nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), 
+        num_rows='dynamic', 
         hide_index=True,
         key="data_editor_polars"
     )
-
-    # 3. Guardar cambios y volver a Polars (CONVERSIÓN INVERSA)
-    df_return_polars = pl.from_pandas(edited_df_pandas)
     
-    st.session_state.data = df_return_polars \
-        .with_columns(
-            pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
-            pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
-        )
+    # 🚨 Botón de Guardado Explícito (Commit)
+    if st.button("✅ Aplicar y Guardar Cambios (Alta, Baja y Modificación)"):
+        
+        st.info("Procesando cambios...")
+        
+        # 1. Convertir el CUD-complete Pandas DF de vuelta a Polars
+        df_committed_polars = pl.from_pandas(edited_df_pandas)
+        
+        # 2. Aplicar la conversión inversa de fecha (datetime -> string YYYY-MM-DD)
+        df_committed_polars = df_committed_polars \
+            .with_columns(
+                pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
+                pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
+            )
+        
+        # 3. Reemplazar los datos en memoria
+        st.session_state.data = df_committed_polars
+        st.success(f"Cambios aplicados. Total de registros en memoria: {len(st.session_state.data)}.")
+        
+        # Forzar un nuevo render para que el editor se actualice con los datos guardados
+        st.experimental_rerun() 
 
     st.header("3. Finalizar y Exportar")
     
-    # 3.1 Descarga de Datos (Incluye el nuevo botón DB)
+    # 3.1 Descarga de Datos (DB y CSV)
 
     st.download_button(
         label="💾 Descargar Base de Datos Actualizada (.db)",
@@ -283,7 +296,7 @@ if len(st.session_state.data) > 0:
         help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
     )
     
-    st.markdown("---") # Separador para el formato alternativo
+    st.markdown("---") 
 
     st.download_button(
         label="⬇️ Descargar CSV (Alternativo)",
@@ -294,9 +307,9 @@ if len(st.session_state.data) > 0:
     )
     
     # 3.2 Envío por Email (Lógica Pendiente)
-    '''st.markdown(f"""
-    **🚨 Envío a Email:** El envío a `lzurverra@epe.santafe.gov.ar` requiere configuración SMTP y credenciales en variables de entorno de Render.
-    """)'''
+    #st.markdown(f"""
+    #**🚨 Envío a Email:** El envío a `lzurverra@epe.santafe.gov.ar` requiere configuración SMTP y credenciales en variables de entorno de Render.
+    #""")
     
 else:
     st.info("Por favor, cargue una Base de Datos existente o un CSV para comenzar a trabajar.")
