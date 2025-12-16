@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 import polars as pl
 import sqlite3
 import io
@@ -230,14 +231,30 @@ if len(st.session_state.data) > 0:
     
     st.header(f"2. Edición de Registros ({len(st.session_state.data)} en memoria)")
     
-    # Conversión CRÍTICA: Polars a Pandas para st.data_editor
+    # Conversión CRÍTICA: Polars a Pandas
     df_edit_pandas = st.session_state.data.to_pandas()
     
-    # Asegura que las fechas son strings válidos
-    df_edit_pandas['fecha_intervencion'] = df_edit_pandas['fecha_intervencion'].fillna(datetime.now().strftime(DATE_FORMAT))
-    df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(datetime.now().strftime(DATE_FORMAT))
-
-
+    # 🚨 CORRECCIÓN CRÍTICA: CONVERSIÓN A DATETIME DE PANDAS 🚨
+    # Para que st.column_config.DateColumn funcione, la columna DEBE ser datetime64[ns].
+    try:
+        # Convertir la columna de string (Utf8) a datetime de Pandas
+        df_edit_pandas['fecha_intervencion'] = pd.to_datetime(
+            df_edit_pandas['fecha_intervencion'], 
+            format=DATE_FORMAT, 
+            errors='coerce' # Convierte valores inválidos a NaT (Not a Time)
+        )
+        # Opcional: convertir fecha_alta también para evitar futuros errores, aunque no se edite
+        df_edit_pandas['fecha_alta'] = pd.to_datetime(
+            df_edit_pandas['fecha_alta'], 
+            format=DATE_FORMAT, 
+            errors='coerce' 
+        )
+    except Exception as e:
+        st.error(f"Fallo al convertir columnas de fecha a formato datetime: {e}")
+        # Si falla, el editor de fechas no funcionará, pero al menos la app no crashea
+        
+    # El DataFrame ahora tiene tipos datetime, lo cual Streamlit acepta.
+    
     estado_config = st.column_config.SelectboxColumn("Estado", options=list(ESTADOS), required=True)
     fecha_config = st.column_config.DateColumn("Fecha Intervención", format=DATE_FORMAT, required=True)
 
@@ -253,10 +270,14 @@ if len(st.session_state.data) > 0:
         key="data_editor_polars"
     )
 
-    # 3. Guardar cambios y volver a Polars
-    st.session_state.data = pl.from_pandas(edited_df_pandas)
-
-    st.header("3. Finalizar y Exportar")
+    # 3. Guardar cambios y volver a Polars (CONVERSIÓN INVERSA)
+    # Volvemos a Polars, asegurando que la fecha se guarde como string YYYY-MM-DD
+    # ya que tu esquema de DB final (SQLite TEXT) lo requiere.
+    st.session_state.data = pl.from_pandas(edited_df_pandas) \
+        .with_columns(
+            pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
+            pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') # Asegurar que fecha_alta también vuelve a ser string
+        )
     
     # 3.1 Descarga de Datos (Recomendado CSV para entorno efímero)
     st.markdown("⚠️ **Recomendación:** Descargue como CSV para evitar fallos de persistencia de archivos `.db` en Render Free.")
