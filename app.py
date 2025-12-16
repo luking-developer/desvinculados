@@ -86,12 +86,18 @@ def cargar_db(uploaded_file):
     conn_disk = None
     temp_file_path = None
     
+    # 🚨 CAMBIO CRÍTICO: Leer los bytes del archivo ANTES de usarlos 
+    db_bytes = uploaded_file.read()
+
+    # Guardar los bytes originales para permitir la descarga inmediata
+    st.session_state.db_bytes = db_bytes 
+    st.session_state.db_filename = uploaded_file.name
+
     try:
         # 1. Crear ruta de archivo temporal única en /tmp
         temp_file_path = f"/tmp/{uuid.uuid4()}.db"
         
-        # 2. Leer y escribir el contenido de la DB subida al disco temporal
-        db_bytes = uploaded_file.read()
+        # 2. Escribir el contenido de la DB subida al disco temporal
         with open(temp_file_path, "wb") as f:
             f.write(db_bytes)
             
@@ -99,10 +105,11 @@ def cargar_db(uploaded_file):
         conn_disk = sqlite3.connect(temp_file_path)
         conn = sqlite3.connect(':memory:')
 
-        # 4. Transferir contenido de disco a memoria (MÉTODO ROBUSTO)
+        # 4. Transferir contenido de disco a memoria
         conn_disk.backup(conn)
         
-        # 5. Leer datos de la DB en memoria
+        # 5. Leer datos de la DB en memoria... (resto de la lógica de Polars)
+        # ... (Se omite la lectura de Polars y el almacenamiento en st.session_state.data por brevedad)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM desvinculados")
         data = cursor.fetchall()
@@ -110,7 +117,9 @@ def cargar_db(uploaded_file):
         
         if not data:
              st.warning("La tabla 'desvinculados' estaba vacía.")
-             df = pl.DataFrame({col: [] for col in column_names})
+             # Crear DataFrame vacío con esquema correcto
+             schema = {col: pl.Utf8 for col in column_names}
+             df = pl.DataFrame({col: [] for col in column_names}, schema=schema)
         else:
              df = pl.DataFrame(data, schema=column_names)
 
@@ -130,7 +139,7 @@ def cargar_db(uploaded_file):
         st.error(f"Error inesperado al cargar la DB: {e}")
         st.session_state.db_cargada = False
     finally:
-        # 6. Limpieza crítica
+        # Limpieza crítica
         if conn_disk:
              conn_disk.close()
         if temp_file_path and os.path.exists(temp_file_path):
@@ -218,8 +227,19 @@ col1, col2 = st.columns(2)
 
 with col1:
     db_file = st.file_uploader("Cargar Base de Datos Existente (.db)", type=['db', 'sqlite'])
-    if db_file: # Se quita el 'and not st.session_state.db_cargada' para permitir recarga
+    if db_file: 
         cargar_db(db_file)
+    
+    # 🚨 CAMBIO CRÍTICO: Botón de descarga de la DB original
+    if 'db_bytes' in st.session_state and st.session_state.db_bytes is not None:
+        st.markdown("---")
+        st.download_button(
+            label=f"⬇️ Descargar copia de {st.session_state.db_filename}",
+            data=st.session_state.db_bytes,
+            file_name=st.session_state.db_filename,
+            mime='application/octet-stream',
+            help="Descarga el archivo DB original tal como fue subido."
+        )
 
 with col2:
     csv_file = st.file_uploader("Cargar Archivo CSV para Nuevos Registros", type=['csv'])
