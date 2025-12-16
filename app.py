@@ -23,6 +23,7 @@ MONTH_MAPPING = {
 TRUE_VALUES = {'1', 't', 'true', 'si', 's'} 
 DB_COLUMNS = ['nro_cli', 'nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta', 'fecha_intervencion', 'estado']
 ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
+FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS) # Opciones de filtro de vista
 
 CSV_TO_DB_MAPPING = {
     'NROCLI': 'nro_cli', 'NUMERO_MEDIDOR': 'nro_med', 'FULLNAME': 'usuario',
@@ -30,7 +31,7 @@ CSV_TO_DB_MAPPING = {
 }
 
 FINAL_SCHEMA = {
-    'nro_cli': pl.Int64,
+    'nro_cli': pl.Int64, # Clave primaria para el merge
     'nro_med': pl.Int64,
     'usuario': pl.Utf8,
     'domicilio': pl.Utf8,
@@ -105,7 +106,7 @@ def cargar_db(uploaded_file):
         
         st.session_state.data = df
         st.session_state.db_cargada = True
-        st.success(f"Base de datos cargada con {len(df)} registros usando Polars.")
+        st.success(f"Base de datos cargada con {len(df)} registros.")
         
     except sqlite3.OperationalError as e:
         st.error(f"Error al leer la tabla 'desvinculados'. El archivo podría estar corrupto: {e}")
@@ -156,11 +157,12 @@ def procesar_csv(uploaded_csv):
                 [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items()]
             )
             df_combined = pl.concat([existing_df, df_csv], how="vertical")
+            # Usar unique para desduplicar por nro_cli
             st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
         else:
             st.session_state.data = df_csv.unique(subset=['nro_cli'], keep='first')
 
-        st.success(f"CSV importado con Polars. Total de registros: {len(st.session_state.data)}.")
+        st.success(f"CSV importado. Total de registros: {len(st.session_state.data)}.")
 
     except Exception as e:
         st.error(f"Error durante el procesamiento del CSV: {e}")
@@ -171,6 +173,7 @@ def guardar_db_bytes(df):
     
     # Escribir el DF de Polars a SQLite en memoria
     try:
+        # Intentar con Polars writer (más eficiente)
         df.write_database(
             table_name='desvinculados', 
             connection=conn, 
@@ -178,7 +181,7 @@ def guardar_db_bytes(df):
             database_driver='sqlite' 
         )
     except Exception:
-        # Fallback to Pandas if Polars DB writer fails (e.g. schema issues)
+        # Fallback a Pandas si el writer de Polars falla
         df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
         
     # Transferir de DB en memoria a archivo binario para la descarga
@@ -211,12 +214,12 @@ st.header("1. Carga de Datos")
 col1, col2 = st.columns(2)
 
 with col1:
-    db_file = st.file_uploader("Cargar Base de Datos Existente (.db)", type=['db', 'sqlite'])
+    db_file = st.file_uploader("Cargar Base de Datos existente (.db)", type=['db', 'sqlite'])
     if db_file: 
         cargar_db(db_file)
 
 with col2:
-    csv_file = st.file_uploader("Cargar Archivo CSV para Nuevos Registros", type=['csv'])
+    csv_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv'])
     if csv_file:
         procesar_csv(csv_file)
         
@@ -224,9 +227,25 @@ with col2:
 if len(st.session_state.data) > 0:
     
     st.header(f"2. Gestión de Registros ({len(st.session_state.data)} en memoria)")
+
+    # 🚨 NUEVO: Selector de Filtro 
+    filtro_estado = st.selectbox(
+        "Filtrar Registros:",
+        options=FILTRO_OPTIONS,
+        index=FILTRO_OPTIONS.index('pendiente'), # Por defecto 'pendiente'
+        key="filter_selectbox"
+    )
+
+    # Aplicar el filtro al DataFrame antes de pasarlo al editor
+    df_to_edit = st.session_state.data.clone()
     
+    if filtro_estado != "Todos los registros":
+        df_to_edit = df_to_edit.filter(pl.col('estado') == filtro_estado)
+
+    st.info(f"Mostrando {len(df_to_edit)} de {len(st.session_state.data)} registros en total.")
+
     # Conversión CRÍTICA: Polars (string dates) a Pandas (datetime dates)
-    df_edit_pandas = st.session_state.data.to_pandas()
+    df_edit_pandas = df_to_edit.to_pandas()
     
     # Aplicar conversión de tipo a datetime para que el DateColumn de Streamlit funcione
     try:
@@ -246,45 +265,64 @@ if len(st.session_state.data) > 0:
     df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(hoy_datetime)
     
     # Configuración de columnas
-    estado_config = st.column_config.SelectboxColumn("Estado", options=list(ESTADOS), required=True)
-    fecha_config = st.column_config.DateColumn("Fecha Intervención", format=DATE_FORMAT, required=True)
+    estado_config = st.column_config.SelectboxColumn("estado", options=list(ESTADOS), required=True)
+    fecha_config = st.column_config.DateColumn("fecha_intervencion", format=DATE_FORMAT, required=True)
 
     # 🚨 ABM Interface: num_rows='dynamic' habilita Alta (Add row) y Baja (trash icon)
+    # nro_cli ahora es editable para permitir el ABM
     edited_df_pandas = st.data_editor(
         df_edit_pandas,
         column_config={
             "estado": estado_config,
             "fecha_intervencion": fecha_config
         },
-        disabled=('nro_cli', 'nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), 
+        disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), # nro_cli removido de disabled
         num_rows='dynamic', 
         hide_index=True,
         key="data_editor_polars"
     )
     
     # 🚨 Botón de Guardado Explícito (Commit)
-    if st.button("✅ Aplicar y Guardar Cambios (Alta, Baja y Modificación)"):
+    if st.button("✅ Guardar cambios"):
         
         st.info("Procesando cambios...")
         
-        # 1. Convertir el CUD-complete Pandas DF de vuelta a Polars
+        # 1. Convertir el DF editado a Polars y limpiar tipos
         df_committed_polars = pl.from_pandas(edited_df_pandas)
         
-        # 2. Aplicar la conversión inversa de fecha (datetime -> string YYYY-MM-DD)
+        # Eliminar registros con nro_cli nulo o cero (nuevas filas que el usuario no llenó)
+        df_committed_polars = df_committed_polars.filter(
+            (pl.col('nro_cli').is_not_null()) & (pl.col('nro_cli') > 0)
+        )
+        
+        # Aplicar la conversión inversa de fecha (datetime -> string YYYY-MM-DD)
         df_committed_polars = df_committed_polars \
             .with_columns(
                 pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
                 pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
             )
+
+        # 2. Lógica de Fusión (Merge) para actualizar el DataFrame completo
+        df_full_original = st.session_state.data.clone()
         
-        # 3. Reemplazar los datos en memoria
-        st.session_state.data = df_committed_polars
+        # Obtener los nro_cli que estaban visibles/editados/añadidos
+        nro_cli_committed = df_committed_polars.get_column('nro_cli')
+        
+        # Anti-Join: Mantener solo los registros originales que NO fueron afectados (no estaban visibles)
+        # Esto elimina de la base original tanto los registros modificados como los eliminados (Baja) del subset visible
+        df_unaffected = df_full_original.filter(
+            ~pl.col('nro_cli').is_in(nro_cli_committed)
+        )
+        
+        # 3. Concatenar los registros no afectados con los nuevos registros comprometidos (Modificación + Alta)
+        st.session_state.data = pl.concat([df_unaffected, df_committed_polars], how="vertical")
+        
         st.success(f"Cambios aplicados. Total de registros en memoria: {len(st.session_state.data)}.")
         
-        # Forzar un nuevo render para que el editor se actualice con los datos guardados
-        st.experimental_rerun() 
+        # Forzar un nuevo render para actualizar el editor, el contador de registros y el filtro
+        st.rerun() 
 
-    st.header("3. Finalizar y Exportar")
+    st.header("3. Finalizar y exportar")
     
     # 3.1 Descarga de Datos (DB y CSV)
 
