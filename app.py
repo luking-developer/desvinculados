@@ -234,27 +234,38 @@ if len(st.session_state.data) > 0:
     # Conversión CRÍTICA: Polars a Pandas
     df_edit_pandas = st.session_state.data.to_pandas()
     
-    # 🚨 CORRECCIÓN CRÍTICA: CONVERSIÓN A DATETIME DE PANDAS 🚨
-    # Para que st.column_config.DateColumn funcione, la columna DEBE ser datetime64[ns].
+    # 🚨 CORRECCIÓN CRÍTICA: LIMPIEZA Y CONVERSIÓN A DATETIME DE PANDAS 🚨
+    
+    # 1. Limpiar y convertir 'fecha_intervencion' a datetime64[ns]
     try:
-        # Convertir la columna de string (Utf8) a datetime de Pandas
+        # Forzar la conversión de la columna a datetime de Pandas, usando el formato estricto
         df_edit_pandas['fecha_intervencion'] = pd.to_datetime(
             df_edit_pandas['fecha_intervencion'], 
             format=DATE_FORMAT, 
-            errors='coerce' # Convierte valores inválidos a NaT (Not a Time)
+            errors='coerce' # Convierte valores inválidos (como esos signos extraños) a NaT
         )
-        # Opcional: convertir fecha_alta también para evitar futuros errores, aunque no se edite
+        
+        # 2. Limpiar y convertir 'fecha_alta' a datetime64[ns] (solo fecha)
+        # Esto asegura que si hay basura en la columna, se limpia a NaT
         df_edit_pandas['fecha_alta'] = pd.to_datetime(
             df_edit_pandas['fecha_alta'], 
             format=DATE_FORMAT, 
             errors='coerce' 
         )
-    except Exception as e:
-        st.error(f"Fallo al convertir columnas de fecha a formato datetime: {e}")
-        # Si falla, el editor de fechas no funcionará, pero al menos la app no crashea
         
-    # El DataFrame ahora tiene tipos datetime, lo cual Streamlit acepta.
+    except Exception as e:
+        # Este error es muy improbable aquí, pero lo capturamos
+        st.error(f"Fallo grave al convertir columnas de fecha: {e}")
+        
+    # Llenar valores NaT (inválidos) con la fecha de hoy para evitar errores en la interfaz
+    # Pandas no puede manejar NaT en el data_editor para columnas requeridas.
+    hoy_datetime = datetime.now().date() # Usamos objeto date para ser estricto
     
+    # Convertir NaT (Not a Time) a la fecha de hoy.
+    df_edit_pandas['fecha_intervencion'] = df_edit_pandas['fecha_intervencion'].fillna(hoy_datetime)
+    df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(hoy_datetime)
+    
+
     estado_config = st.column_config.SelectboxColumn("Estado", options=list(ESTADOS), required=True)
     fecha_config = st.column_config.DateColumn("Fecha Intervención", format=DATE_FORMAT, required=True)
 
@@ -264,20 +275,24 @@ if len(st.session_state.data) > 0:
             "estado": estado_config,
             "fecha_intervencion": fecha_config
         },
-        # Campos que no se deben poder modificar
         disabled=('nro_cli', 'nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), 
         hide_index=True,
         key="data_editor_polars"
     )
 
     # 3. Guardar cambios y volver a Polars (CONVERSIÓN INVERSA)
-    # Volvemos a Polars, asegurando que la fecha se guarde como string YYYY-MM-DD
-    # ya que tu esquema de DB final (SQLite TEXT) lo requiere.
-    st.session_state.data = pl.from_pandas(edited_df_pandas) \
+    # Volvemos a Polars, asegurando que la fecha se guarde SOLO como string YYYY-MM-DD (sin hora).
+    
+    # Paso A: Convertir el DataFrame editado de vuelta a Polars
+    df_return_polars = pl.from_pandas(edited_df_pandas)
+    
+    # Paso B: Usar dt.strftime para forzar el formato YYYY-MM-DD (sin hora)
+    st.session_state.data = df_return_polars \
         .with_columns(
             pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
-            pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') # Asegurar que fecha_alta también vuelve a ser string
+            pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
         )
+    # Aseguramos que la columna 'fecha_alta' permanece de tipo Utf8 (string) si no es un datetime.
     
     # 3.1 Descarga de Datos (Recomendado CSV para entorno efímero)
     st.markdown("⚠️ **Recomendación:** Descargue como CSV para evitar fallos de persistencia de archivos `.db` en Render Free.")
