@@ -210,7 +210,7 @@ if 'data' not in st.session_state:
     st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
     
 # --- Controles de Carga ---
-st.header("1. Carga de Datos")
+st.header("1. Carga de datos")
 col1, col2 = st.columns(2)
 
 with col1:
@@ -226,11 +226,11 @@ with col2:
 # --- Interfaz de ABM y Edición ---
 if len(st.session_state.data) > 0:
     
-    st.header(f"2. Gestión de Registros ({len(st.session_state.data)} en memoria)")
+    st.header(f"2. Gestión de registros ({len(st.session_state.data)} en memoria)")
 
     # 🚨 NUEVO: Selector de Filtro 
     filtro_estado = st.selectbox(
-        "Filtrar Registros:",
+        "Filtrar registros:",
         options=FILTRO_OPTIONS,
         index=FILTRO_OPTIONS.index('pendiente'), # Por defecto 'pendiente'
         key="filter_selectbox"
@@ -322,27 +322,31 @@ if len(st.session_state.data) > 0:
         # Forzar un nuevo render para actualizar el editor, el contador de registros y el filtro
         st.rerun() 
 
-    st.header("3. Finalizar y exportar")
-    
     # 3.1 Descarga de Datos (DB y CSV)
 
-    st.download_button(
-        label="💾 Descargar Base de Datos Actualizada (.db)",
-        data=guardar_db_bytes(st.session_state.data),
-        file_name='desvinculados_actualizado.db',
-        mime='application/octet-stream',
-        help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
-    )
+    st.header("3. Finalizar y exportar")
     
-    st.markdown("---") 
+    col1_footer, col2_footer = st.columns(2)
 
-    st.download_button(
-        label="⬇️ Descargar CSV (Alternativo)",
-        data=st.session_state.data.write_csv(None).encode('utf-8'),
-        file_name='desvinculados_actualizado.csv',
-        mime='text/csv',
-        help="Descarga los datos en formato CSV (más compatible con entornos web)."
-    )
+    with col1_footer:
+        st.download_button(
+            label="💾 Descargar Base de Datos (.db)",
+            data=guardar_db_bytes(st.session_state.data),
+            file_name='desvinculados_actualizado.db',
+            mime='application/octet-stream',
+            help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
+        )
+    
+    #st.markdown("---")
+
+    with col2_footer:
+        st.download_button(
+            label="⬇️ Descargar CSV (opcional)",
+            data=st.session_state.data.write_csv(None).encode('utf-8'),
+            file_name='desvinculados_actualizado.csv',
+            mime='text/csv',
+            help="Descarga los datos en formato CSV (más compatible con entornos web)."
+        )
     
     # 3.2 Envío por Email (Lógica Pendiente)
     #st.markdown(f"""
