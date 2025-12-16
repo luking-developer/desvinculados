@@ -1,7 +1,7 @@
 import streamlit as st
 import polars as pl
 import sqlite3
-import pandas as pd
+import pandas as pd # Necesario para st.data_editor
 import io
 import os 
 import re
@@ -26,28 +26,152 @@ ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
 
 CSV_TO_DB_MAPPING = {
     'NROCLI': 'nro_cli', 'NUMERO_MEDIDOR': 'nro_med', 'FULLNAME': 'usuario',
-    'DOMICILIO_COMERCIAL': 'domicilio', 'NORMALICOMERCIAL': 'normalizado', 'FECHA_ALTA': 'fecha_alta'
+    'DOMICILIO_COMERCIAL': 'domicilio', 'NORMALIZADO': 'normalizado', 'FECHA_ALTA': 'fecha_alta'
 }
 
 FINAL_SCHEMA = {
-    'nro_cli': pl.Int64, 'nro_med': pl.Int64, 'usuario': pl.Utf8, 
-    'domicilio': pl.Utf8, 'normalizado': pl.Int64, 'fecha_alta': pl.Utf8, 
-    'fecha_intervencion': pl.Utf8, 'estado': pl.Utf8
+    'nro_cli': pl.Int64,
+    'nro_med': pl.Int64,
+    'usuario': pl.Utf8,
+    'domicilio': pl.Utf8,
+    'normalizado': pl.Int64, 
+    'fecha_alta': pl.Utf8, 
+    'fecha_intervencion': pl.Utf8,
+    'estado': pl.Utf8
 }
 
 # ==============================================================================
-# 2. FUNCIONES DE LÓGICA DE NEGOCIO Y MANEJO DE ARCHIVOS (Solo relevantes)
+# 2. FUNCIONES DE LÓGICA DE NEGOCIO Y MANEJO DE ARCHIVOS
 # ==============================================================================
 
-# ... (normalizar_fecha, cargar_db, procesar_csv se mantienen igual) ...
+def normalizar_fecha(fecha_str):
+    """Convierte cadena de fecha abreviada al formato 'YYYY-MM-DD'."""
+    if fecha_str is None or pl.Series([fecha_str]).is_null().item():
+        return datetime.now().strftime(DATE_FORMAT)
 
-# Nota: Las funciones normalizar_fecha, cargar_db y procesar_csv deben estar definidas aquí.
-# Las dejaremos omitidas por brevedad, asumiendo que tienes la última versión funcional.
+    fecha_str = str(fecha_str) 
+    try:
+        clean_str = fecha_str.lower().replace('.', '').strip()
+        match = re.match(r'(\d{1,2})\s*([a-z]+)\s*(\d{4})', clean_str)
+        
+        if match:
+            day, month_abbr, year = match.groups()
+            month_num = MONTH_MAPPING.get(month_abbr, None)
+            
+            if month_num is not None:
+                normalized_date = datetime(int(year), month_num, int(day))
+                return normalized_date.strftime(DATE_FORMAT)
+
+        datetime.strptime(clean_str, DATE_FORMAT)
+        return clean_str 
+
+    except Exception:
+        return None 
+
+def cargar_db(uploaded_file):
+    """Carga DB de disco a Polars DataFrame en memoria."""
+    conn = None
+    conn_disk = None
+    temp_file_path = None
+    
+    db_bytes = uploaded_file.read()
+    # 🚨 CAMBIO DE REQUISITO: Remover el almacenamiento de db_bytes 
+    # para evitar la descarga del archivo original.
+    
+    try:
+        temp_file_path = f"/tmp/{uuid.uuid4()}.db"
+        
+        with open(temp_file_path, "wb") as f:
+            f.write(db_bytes)
+            
+        conn_disk = sqlite3.connect(temp_file_path)
+        conn = sqlite3.connect(':memory:')
+
+        conn_disk.backup(conn)
+        
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM desvinculados")
+        data = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        
+        if not data:
+             st.warning("La tabla 'desvinculados' estaba vacía.")
+             schema = {col: pl.Utf8 for col in column_names}
+             df = pl.DataFrame({col: [] for col in column_names}, schema=schema)
+        else:
+             df = pl.DataFrame(data, schema=column_names)
+
+        df = df.with_columns(
+            pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT))
+        )
+        
+        st.session_state.data = df
+        st.session_state.db_cargada = True
+        st.success(f"Base de datos cargada con {len(df)} registros usando Polars.")
+        
+    except sqlite3.OperationalError as e:
+        st.error(f"Error al leer la tabla 'desvinculados'. El archivo podría estar corrupto: {e}")
+        st.session_state.db_cargada = False
+    except Exception as e:
+        st.error(f"Error inesperado al cargar la DB: {e}")
+        st.session_state.db_cargada = False
+    finally:
+        if conn_disk:
+             conn_disk.close()
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+def procesar_csv(uploaded_csv):
+    """Procesa y fusiona el CSV con los datos existentes (Polars)."""
+    try:
+        df_csv = pl.read_csv(uploaded_csv, encoding='utf-8')
+        df_csv = df_csv.rename({k: v for k, v in CSV_TO_DB_MAPPING.items()})
+        
+        # Normalización de Fechas y Valores por defecto
+        df_csv = df_csv.with_columns(
+            pl.col('fecha_alta')
+              .map_elements(normalizar_fecha, return_dtype=pl.Utf8)
+              .alias('fecha_alta')
+        ).filter(pl.col('fecha_alta').is_not_null())
+        
+        df_csv = df_csv.with_columns(
+             pl.when(pl.col('normalizado').cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES))
+               .then(pl.lit(1).cast(pl.Int64))
+               .otherwise(pl.lit(0).cast(pl.Int64))
+               .alias('normalizado')
+        )
+        
+        hoy = datetime.now().strftime(DATE_FORMAT)
+        df_csv = df_csv.with_columns([
+            pl.lit('pendiente').alias('estado'),
+            pl.lit(hoy).alias('fecha_intervencion')
+        ])
+        
+        # Asegurar esquema (CRÍTICO)
+        df_csv = df_csv.select(
+            [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df_csv.columns]
+        )
+
+        # Fusión
+        if st.session_state.data is not None and len(st.session_state.data) > 0:
+            existing_df = st.session_state.data.select(
+                [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items()]
+            )
+            df_combined = pl.concat([existing_df, df_csv], how="vertical")
+            st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
+        else:
+            st.session_state.data = df_csv.unique(subset=['nro_cli'], keep='first')
+
+        st.success(f"CSV importado con Polars. Total de registros: {len(st.session_state.data)}.")
+
+    except Exception as e:
+        st.error(f"Error durante el procesamiento del CSV: {e}")
 
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
     conn = sqlite3.connect(':memory:')
     
+    # Escribir el DF de Polars a SQLite en memoria
     try:
         df.write_database(
             table_name='desvinculados', 
@@ -56,9 +180,9 @@ def guardar_db_bytes(df):
             database_driver='sqlite' 
         )
     except Exception:
-        # Fallback a Pandas si Polars no puede escribir al DB
         df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
         
+    # Transferir de DB en memoria a archivo binario para la descarga
     temp_file_path = f"/tmp/{uuid.uuid4()}.db"
     conn_disk = sqlite3.connect(temp_file_path)
     conn.backup(conn_disk)
@@ -71,134 +195,96 @@ def guardar_db_bytes(df):
     return db_bytes
 
 # ==============================================================================
-# 3. IMPLEMENTACIÓN DEL ABM
-# ==============================================================================
-
-# Función para manejar el Alta (Agregar registro)
-def agregar_registro(nro_cli, nro_med, usuario, domicilio):
-    
-    if nro_cli in st.session_state.data['nro_cli'].to_list():
-        st.error(f"Error: El Nro. Cliente {nro_cli} ya existe.")
-        return False
-        
-    hoy_str = datetime.now().strftime(DATE_FORMAT)
-    
-    nuevo_registro = pl.DataFrame({
-        'nro_cli': [nro_cli],
-        'nro_med': [nro_med],
-        'usuario': [usuario],
-        'domicilio': [domicilio],
-        'normalizado': [0],
-        'fecha_alta': [hoy_str],
-        'fecha_intervencion': [hoy_str],
-        'estado': ['pendiente']
-    }).select(
-        [pl.col(col).cast(FINAL_SCHEMA[col]) for col in FINAL_SCHEMA.keys()]
-    )
-
-    st.session_state.data = pl.concat([st.session_state.data, nuevo_registro], how="vertical")
-    st.success(f"Registro del cliente {nro_cli} añadido con éxito.")
-    return True
-
-# ==============================================================================
-# 4. INTERFAZ DE USUARIO (STREAMLIT)
+# 3. INTERFAZ DE USUARIO (STREAMLIT)
 # ==============================================================================
 
 st.set_page_config(layout="wide", page_title="Gestor EPE")
-st.title("⚡ Gestor Web de Desvinculados EPE (ABM)")
+st.title("⚡ Gestor Web de Desvinculados EPE")
 
-# ... (Inicialización del estado de sesión y Carga de Datos se mantienen igual) ...
-if 'db_cargada' not in st.session_state: st.session_state.db_cargada = False
-if 'data' not in st.session_state: st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
+# 1. Inicialización del estado de sesión
+if 'db_cargada' not in st.session_state:
+    st.session_state.db_cargada = False
+if 'data' not in st.session_state:
+    st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
     
 # --- Controles de Carga ---
 st.header("1. Carga de Datos")
 col1, col2 = st.columns(2)
-# ... (Contenido de col1 y col2 para cargar DB y CSV se mantiene igual) ...
 
-# --- Interfaz de ABM (Alta y Edición/Baja) ---
+with col1:
+    db_file = st.file_uploader("Cargar Base de Datos Existente (.db)", type=['db', 'sqlite'])
+    if db_file: 
+        cargar_db(db_file)
+    # 🚨 BOTÓN DE DESCARGA ORIGINAL ELIMINADO SEGÚN REQUERIMIENTO DEL USUARIO
+
+with col2:
+    csv_file = st.file_uploader("Cargar Archivo CSV para Nuevos Registros", type=['csv'])
+    if csv_file:
+        procesar_csv(csv_file)
+        
+# --- Interfaz de Edición ---
 if len(st.session_state.data) > 0:
     
-    st.header(f"2. Gestión de Registros (ABM)")
+    st.header(f"2. Edición de Registros ({len(st.session_state.data)} en memoria)")
     
-    # 2.1 Alta (A) de Registros
-    st.subheader("2.1 Alta de Nuevo Registro")
-    with st.form("form_alta"):
-        colA, colB, colC, colD = st.columns(4)
-        nro_cli = colA.number_input("Nro. Cliente (Clave)", min_value=1, step=1, key="cli_a")
-        nro_med = colB.number_input("Nro. Medidor", min_value=1, step=1, key="med_a")
-        usuario = colC.text_input("Usuario", key="user_a")
-        domicilio = colD.text_input("Domicilio", key="dom_a")
-        
-        submitted = st.form_submit_button("➕ Agregar Registro Manual")
-        if submitted and nro_cli > 0 and usuario and domicilio:
-            agregar_registro(nro_cli, nro_med, usuario, domicilio)
-        elif submitted:
-            st.warning("Debe completar Nro. Cliente, Usuario y Domicilio.")
-            
-    st.markdown("---")
-    
-    # 2.2 Modificación (M) y Baja (B)
-    st.subheader(f"2.2 Modificación y Eliminación ({len(st.session_state.data)} registros)")
-    
-    # Conversión CRÍTICA: Polars a Pandas para st.data_editor
+    # Conversión CRÍTICA: Polars a Pandas
     df_edit_pandas = st.session_state.data.to_pandas()
     
-    # CONVERSIÓN A DATETIME DE PANDAS (Necesario para DateColumn)
+    # CONVERSIÓN A DATETIME DE PANDAS (Necesario para el DateColumn)
     try:
-        df_edit_pandas['fecha_intervencion'] = pd.to_datetime(df_edit_pandas['fecha_intervencion'], format=DATE_FORMAT, errors='coerce')
-        df_edit_pandas['fecha_alta'] = pd.to_datetime(df_edit_pandas['fecha_alta'], format=DATE_FORMAT, errors='coerce')
-    except Exception: pass
+        df_edit_pandas['fecha_intervencion'] = pd.to_datetime(
+            df_edit_pandas['fecha_intervencion'], format=DATE_FORMAT, errors='coerce'
+        )
+        df_edit_pandas['fecha_alta'] = pd.to_datetime(
+            df_edit_pandas['fecha_alta'], format=DATE_FORMAT, errors='coerce'
+        )
         
+    except Exception as e:
+        st.error(f"Fallo grave al convertir columnas de fecha: {e}")
+        
+    # Llenar valores NaT (inválidos) con la fecha de hoy para la interfaz
     hoy_datetime = datetime.now().date() 
     df_edit_pandas['fecha_intervencion'] = df_edit_pandas['fecha_intervencion'].fillna(hoy_datetime)
     df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(hoy_datetime)
     
+
     estado_config = st.column_config.SelectboxColumn("Estado", options=list(ESTADOS), required=True)
     fecha_config = st.column_config.DateColumn("Fecha Intervención", format=DATE_FORMAT, required=True)
 
     edited_df_pandas = st.data_editor(
         df_edit_pandas,
-        column_config={"estado": estado_config, "fecha_intervencion": fecha_config},
+        column_config={
+            "estado": estado_config,
+            "fecha_intervencion": fecha_config
+        },
         disabled=('nro_cli', 'nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), 
-        hide_index=False, # Habilitar índice para la eliminación (Baja)
-        num_rows="dynamic", # Habilitar la adición manual (si fuera compatible, pero es mejor el formulario)
-        key="data_editor_abm"
+        hide_index=True,
+        key="data_editor_polars"
     )
 
-    # 3. Procesar Cambios y Bajas (M y B)
-    if edited_df_pandas is not None:
-        
-        # 3.1 Procesar Bajas (B): Streamlit marca las filas eliminadas.
-        edit_result = st.session_state["data_editor_abm"]
-        if edit_result.get("deleted_rows"):
-            deleted_indices = edit_result["deleted_rows"]
-            
-            # Polars no soporta eliminación por índice de Pandas, pero sí por fila.
-            # Convertimos la lista de índices eliminados a una serie booleana y filtramos.
-            mask = [i not in deleted_indices for i in range(len(st.session_state.data))]
-            st.session_state.data = st.session_state.data.filter(pl.Series(mask))
-            st.success(f"{len(deleted_indices)} registros eliminados con éxito.")
-
-        # 3.2 Procesar Modificaciones (M): Actualizar el estado de sesión
-        df_return_polars = pl.from_pandas(edited_df_pandas)
-        st.session_state.data = df_return_polars \
-            .with_columns(
-                pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
-                pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
-            )
+    # 3. Guardar cambios y volver a Polars (CONVERSIÓN INVERSA)
+    df_return_polars = pl.from_pandas(edited_df_pandas)
+    
+    st.session_state.data = df_return_polars \
+        .with_columns(
+            pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT).alias('fecha_intervencion'),
+            pl.col('fecha_alta').dt.strftime(DATE_FORMAT).alias('fecha_alta') 
+        )
 
     st.header("3. Finalizar y Exportar")
     
-    # 3.3 Descarga (Base de Datos o CSV)
+    # 3.1 Descarga de Datos (Incluye el nuevo botón DB)
+
     st.download_button(
         label="💾 Descargar Base de Datos Actualizada (.db)",
         data=guardar_db_bytes(st.session_state.data),
         file_name='desvinculados_actualizado.db',
         mime='application/octet-stream',
-        help="Guarda la base de datos actualizada con los cambios de ABM."
+        help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
     )
     
+    st.markdown("---") # Separador para el formato alternativo
+
     st.download_button(
         label="⬇️ Descargar CSV (Alternativo)",
         data=st.session_state.data.write_csv(None).encode('utf-8'),
@@ -207,5 +293,10 @@ if len(st.session_state.data) > 0:
         help="Descarga los datos en formato CSV (más compatible con entornos web)."
     )
     
+    # 3.2 Envío por Email (Lógica Pendiente)
+    '''st.markdown(f"""
+    **🚨 Envío a Email:** El envío a `lzurverra@epe.santafe.gov.ar` requiere configuración SMTP y credenciales en variables de entorno de Render.
+    """)'''
+    
 else:
-    st.info("Por favor, cargue una Base de Datos o un CSV para comenzar la gestión de registros.")
+    st.info("Por favor, cargue una Base de Datos existente o un CSV para comenzar a trabajar.")
