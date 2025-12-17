@@ -101,7 +101,7 @@ def procesar_archivo_inteligente(uploaded_file):
             # PASO ITERADO: Forzamos la lectura de bytes pura con el motor 'odf' 
             # asegurándonos de que no haya punteros residuales.
             with io.BytesIO(raw_content) as bio:
-                pd_df = pd.read_excel(bio, engine='odf')
+                pd_df = pd.read_excel(io.BytesIO(bio), engine='odf')
                 df = pl.from_pandas(pd_df)
             
             # Lógica Columna X
@@ -185,7 +185,7 @@ with tab_principal:
         f_db = st.file_uploader("📂 Cargar DB (.db)", type=['db', 'sqlite'], key="db_loader")
         if f_db: cargar_db(f_db)
     with c2:
-        f_in = st.file_uploader("📥 Importar hoja de cálculo (CSV o ODS)", type=['csv', 'ods'], key="sheet_loader")
+        f_in = st.file_uploader("📥 Importar hoja de cálculo", type=['csv', 'ods'], key="sheet_loader")
         if f_in: procesar_archivo_inteligente(f_in)
 
     st.divider()
@@ -235,7 +235,7 @@ with tab_principal:
         with bt1:
             st.download_button("💾 Descargar DB", data=exportar_db(st.session_state.data), file_name="epe_data.db")
         with bt2:
-            st.download_button("📄 Descargar CSV", data=st.session_state.data.write_csv().encode('utf-8'), file_name="reporte_epe.csv")
+            st.download_button("📄 Descargar CSV", data=st.session_state.data.write_csv().encode('utf-8'), file_name="reporte.csv")
         with bt3:
             if st.button("🗑️ Limpiar procesados ('cargado')", type="primary"):
                 st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
