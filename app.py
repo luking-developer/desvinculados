@@ -20,22 +20,12 @@ MONTH_MAPPING = {
     'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dic': 12
 }
 
-# Mapeo robusto para el campo normalizado
-TRUE_VALUES = {'1', 't', 'true', 'si', 's', 'yes'} 
-
-# Mapeo para archivos ODS (Columna 'X')
-ODS_ESTADO_MAP = {
-    "+": "cargado",
-    "?": "revisar",
-    "": "pendiente",
-    None: "pendiente",
-    "x": "otro distrito",
-    "-": "otro distrito"
-}
-
+# Blindaje para la columna 'normalizado'
+TRUE_VALUES = {'1', 't', 'true', 'si', 's', 'true'} 
 ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
 FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS)
 
+# Mapeo de columnas estándar
 CSV_TO_DB_MAPPING = {
     'NROCLI': 'nro_cli', 'NUMERO_MEDIDOR': 'nro_med', 'FULLNAME': 'usuario',
     'DOMICILIO_COMERCIAL': 'domicilio', 'NORMALIZADO': 'normalizado', 'FECHA_ALTA': 'fecha_alta'
@@ -52,6 +42,15 @@ FINAL_SCHEMA = {
     'estado': pl.Utf8
 }
 
+# Mapeo especial para archivos ODS con columna "X"
+ODS_X_MAPPING = {
+    '+': 'cargado',
+    '?': 'revisar',
+    '': 'pendiente',
+    'x': 'otro distrito',
+    '-': 'otro distrito'
+}
+
 # ==============================================================================
 # 2. FUNCIONES DE LÓGICA DE NEGOCIO
 # ==============================================================================
@@ -59,25 +58,18 @@ FINAL_SCHEMA = {
 def normalizar_fecha(fecha_str):
     if fecha_str is None or str(fecha_str).strip() in ["", "None", "nan"]:
         return datetime.now().strftime(DATE_FORMAT)
-
     fecha_str = str(fecha_str) 
     try:
         clean_str = fecha_str.lower().replace('.', '').strip()
         match = re.match(r'(\d{1,2})\s*([a-z]+)\s*(\d{4})', clean_str)
-        
         if match:
             day, month_abbr, year = match.groups()
-            month_num = MONTH_MAPPING.get(month_abbr, None)
+            month_num = MONTH_MAPPING.get(month_abbr)
             if month_num:
                 return datetime(int(year), month_num, int(day)).strftime(DATE_FORMAT)
-
-        return pd.to_datetime(clean_str).strftime(DATE_FORMAT)
+        return datetime.strptime(clean_str, DATE_FORMAT).strftime(DATE_FORMAT)
     except:
         return datetime.now().strftime(DATE_FORMAT)
-
-def normalizar_booleanos(serie):
-    """Convierte SI/NO, 1/0 o True/False a entero 1/0 de forma segura."""
-    return serie.cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES).cast(pl.Int64)
 
 def cargar_db(uploaded_file):
     try:
@@ -85,91 +77,82 @@ def cargar_db(uploaded_file):
         temp_file_path = f"/tmp/{uuid.uuid4()}.db"
         with open(temp_file_path, "wb") as f:
             f.write(db_bytes)
-            
         conn_disk = sqlite3.connect(temp_file_path)
         conn = sqlite3.connect(':memory:')
         conn_disk.backup(conn)
+        conn_disk.close()
         
         df = pl.read_database("SELECT * FROM desvinculados", conn)
         df = df.with_columns(pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT)))
-        
         st.session_state.data = df
         st.session_state.db_cargada = True
         st.success(f"Base de datos cargada: {len(df)} registros.")
-        conn_disk.close()
         os.remove(temp_file_path)
     except Exception as e:
         st.error(f"Error cargando DB: {e}")
 
-def procesar_csv(uploaded_csv):
-    """Procesamiento de CSV con corrección de error str -> i64 en 'normalizado'."""
+def procesar_archivo_inteligente(uploaded_file):
+    """Detecta extensión y procesa según lógica de negocio."""
     try:
-        # Leemos todo como string inicialmente para evitar el error de casteo automático
-        df_csv = pl.read_csv(uploaded_csv, infer_schema_length=0)
-        df_csv = df_csv.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df_csv.columns})
-        
-        # Aplicar correcciones de tipos
-        df_csv = df_csv.with_columns([
-            pl.col('nro_cli').cast(pl.Int64),
-            pl.col('nro_med').cast(pl.Int64),
-            normalizar_booleanos(pl.col('normalizado')).alias('normalizado'),
-            pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8)
-        ])
-        
-        hoy = datetime.now().strftime(DATE_FORMAT)
-        df_csv = df_csv.with_columns([
-            pl.lit('pendiente').alias('estado'),
-            pl.lit(hoy).alias('fecha_intervencion')
-        ])
-
-        fusionar_datos(df_csv)
-    except Exception as e:
-        st.error(f"Error crítico en CSV: {e}")
-
-def procesar_ods(uploaded_ods):
-    """Lógica para importar ODS con mapeo especial de columna 'X'."""
-    try:
-        # Polars no lee ODS nativamente de forma directa tan fácil, usamos pandas como puente
-        pdf = pd.read_excel(uploaded_ods, engine='odf')
-        
-        if pdf.columns[0] != 'X':
-            st.error("Archivo Inválido: La primera columna debe llamarse 'X'")
+        filename = uploaded_file.name
+        if filename.endswith('.csv'):
+            df = pl.read_csv(uploaded_file, infer_schema_length=10000)
+        elif filename.endswith('.ods'):
+            # Pandas es más robusto para ODS con múltiples tipos
+            pdf = pd.read_excel(uploaded_file, engine='odf')
+            df = pl.from_pandas(pdf)
+        else:
+            st.error("Formato no soportatedo.")
             return
 
-        df_ods = pl.from_pandas(pdf)
-        
-        # Mapeo de la columna X al estado
-        df_ods = df_ods.with_columns([
-            pl.col('X').map_elements(lambda x: ODS_ESTADO_MAP.get(str(x).strip() if x else "", "pendiente"), return_dtype=pl.Utf8).alias('estado')
-        ])
+        # 1. Renombrar columnas
+        df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
 
-        # Renombrar columnas restantes según el mapeo estándar
-        df_ods = df_ods.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df_ods.columns})
-        
-        # Normalización de tipos
-        df_ods = df_ods.with_columns([
-            pl.col('nro_cli').cast(pl.Int64),
-            pl.col('nro_med').cast(pl.Int64),
-            normalizar_booleanos(pl.col('normalizado')).alias('normalizado'),
-            pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8),
-            pl.lit(datetime.now().strftime(DATE_FORMAT)).alias('fecha_intervencion')
-        ])
+        # 2. Lógica Especial Columna "X" (Solo si existe y es la primera)
+        if df.columns[0] == "X":
+            df = df.with_columns(
+                pl.col("X").fill_null("").cast(pl.Utf8).alias("X_str")
+            ).with_columns(
+                pl.col("X_str").replace(ODS_X_MAPPING, default="pendiente").alias("estado")
+            ).drop(["X", "X_str"])
+        else:
+            if "estado" not in df.columns:
+                df = df.with_columns(pl.lit("pendiente").alias("estado"))
 
-        fusionar_datos(df_ods)
-        st.success("Hoja de cálculo ODS importada correctamente.")
+        # 3. Solución al Error de Conversión 'normalizado' (SI/NO -> 1/0)
+        if "normalizado" in df.columns:
+            df = df.with_columns(
+                pl.col("normalizado").cast(pl.Utf8).str.to_lowercase().alias("norm_tmp")
+            ).with_columns(
+                pl.when(pl.col("norm_tmp").is_in(TRUE_VALUES))
+                .then(1)
+                .otherwise(0)
+                .alias("normalizado")
+            ).drop("norm_tmp")
+
+        # 4. Limpieza de Fechas
+        df = df.with_columns(
+            pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8)
+        )
+        
+        if "fecha_intervencion" not in df.columns:
+            df = df.with_columns(pl.lit(datetime.now().strftime(DATE_FORMAT)).alias("fecha_intervencion"))
+
+        # 5. Ajustar al Esquema Final
+        df = df.select([pl.col(c).cast(FINAL_SCHEMA[c]) for c in FINAL_SCHEMA.keys() if c in df.columns])
+
+        # 6. Merge con memoria
+        if len(st.session_state.data) > 0:
+            combined = pl.concat([st.session_state.data, df], how="vertical")
+            st.session_state.data = combined.unique(subset=['nro_cli'], keep='first')
+        else:
+            st.session_state.data = df
+
+        st.success(f"Importación exitosa: {len(df)} registros procesados.")
+        st.rerun()
+
     except Exception as e:
-        st.error(f"Error procesando ODS: {e}")
-
-def fusionar_datos(nuevo_df):
-    """Une los nuevos datos con los existentes en memoria evitando duplicados."""
-    nuevo_df = nuevo_df.select([pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items()])
-    
-    if len(st.session_state.data) > 0:
-        combined = pl.concat([st.session_state.data, nuevo_df], how="vertical")
-        st.session_state.data = combined.unique(subset=['nro_cli'], keep='first')
-    else:
-        st.session_state.data = nuevo_df
-    st.rerun()
+        st.error(f"Error procesando archivo: {e}")
 
 def guardar_db_bytes(df):
     conn = sqlite3.connect(':memory:')
@@ -184,7 +167,7 @@ def guardar_db_bytes(df):
     return db_bytes
 
 # ==============================================================================
-# 3. INTERFAZ DE USUARIO (STREAMLIT)
+# 3. INTERFAZ DE USUARIO
 # ==============================================================================
 
 st.set_page_config(layout="wide", page_title="Gestor EPE", page_icon="⚡")
@@ -193,90 +176,77 @@ if 'data' not in st.session_state:
     st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
 
 # --- MENÚ DE NAVEGACIÓN SUPERIOR ---
-menu = st.tabs(["📊 Gestión Principal", "📥 Importar hoja de cálculo", "⚙️ Configuración"])
+menu = st.tabs(["📂 Carga y Configuración", "📝 Gestión (ABM)", "📤 Exportar"])
 
-# --- TAB 1: GESTIÓN PRINCIPAL ---
 with menu[0]:
-    st.title("⚡ Panel de Gestión EPE")
-    
-    col_u1, col_u2 = st.columns(2)
-    with col_u1:
-        db_file = st.file_uploader("Cargar Base .db", type=['db', 'sqlite'], key="main_db")
+    st.header("1. Importación de Datos")
+    c1, c2 = st.columns(2)
+    with c1:
+        db_file = st.file_uploader("Cargar Base de Datos (.db)", type=['db', 'sqlite'])
         if db_file: cargar_db(db_file)
-    with col_u2:
-        csv_file = st.file_uploader("Cargar registros .csv", type=['csv'], key="main_csv")
-        if csv_file: procesar_csv(csv_file)
+    with c2:
+        # BOTÓN INTELIGENTE UNIFICADO
+        import_file = st.file_uploader("Importar hoja de cálculo (CSV o ODS)", type=['csv', 'ods'])
+        if import_file: procesar_archivo_inteligente(import_file)
 
+with menu[1]:
     if len(st.session_state.data) > 0:
-        st.divider()
+        st.header(f"2. Gestión de registros ({len(st.session_state.data)} en total)")
         
-        # Filtros y ABM
-        filtro_estado = st.selectbox("Filtrar vista por estado:", FILTRO_OPTIONS, index=1) # Default: pendiente
+        # Filtros
+        filtro_estado = st.selectbox("Filtrar por estado:", options=FILTRO_OPTIONS, index=1) # Default: Pendiente
         
         df_view = st.session_state.data.clone()
         if filtro_estado != "Todos los registros":
             df_view = df_view.filter(pl.col('estado') == filtro_estado)
 
-        # Editor de datos
-        df_edit_pandas = df_view.to_pandas()
+        # Preparar para edición
+        pdf_view = df_view.to_pandas()
         for col in ['fecha_intervencion', 'fecha_alta']:
-            df_edit_pandas[col] = pd.to_datetime(df_edit_pandas[col], errors='coerce').dt.date
+            pdf_view[col] = pd.to_datetime(pdf_view[col], errors='coerce').dt.date
 
-        edited_df = st.data_editor(
-            df_edit_pandas,
+        edited_pdf = st.data_editor(
+            pdf_view,
             column_config={
-                "estado": st.column_config.SelectboxColumn("Estado", options=ESTADOS, required=True),
-                "fecha_intervencion": st.column_config.DateColumn("Intervención"),
-                "normalizado": st.column_config.CheckboxColumn("Normalizado")
+                "estado": st.column_config.SelectboxColumn("estado", options=list(ESTADOS), required=True),
+                "fecha_intervencion": st.column_config.DateColumn("fecha_intervencion", format="YYYY-MM-DD")
             },
-            disabled=('nro_med', 'usuario', 'domicilio', 'fecha_alta'),
+            disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'),
             num_rows='dynamic',
             hide_index=True,
             key="main_editor"
         )
 
-        if st.button("✅ Guardar cambios en memoria", use_container_width=True):
-            df_save = pl.from_pandas(edited_df)
-            df_save = df_save.with_columns([
-                pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT),
-                pl.col('fecha_alta').dt.strftime(DATE_FORMAT),
-                pl.col('nro_cli').cast(pl.Int64)
-            ]).filter(pl.col('nro_cli') > 0)
+        if st.button("✅ Guardar cambios en memoria"):
+            new_data = pl.from_pandas(edited_pdf)
+            # Convertir fechas de vuelta a string
+            new_data = new_data.with_columns([
+                pl.col('fecha_intervencion').cast(pl.Utf8),
+                pl.col('fecha_alta').cast(pl.Utf8)
+            ])
             
-            # Merge lógico
-            unaffected = st.session_state.data.filter(~pl.col('nro_cli').is_in(df_save['nro_cli']))
-            st.session_state.data = pl.concat([unaffected, df_save], how="vertical")
-            st.success("Memoria actualizada.")
+            # Merge lógico (Update de los visibles + Conservar invisibles)
+            ids_editados = new_data.get_column("nro_cli")
+            df_unaffected = st.session_state.data.filter(~pl.col("nro_cli").is_in(ids_editados))
+            st.session_state.data = pl.concat([df_unaffected, new_data], how="vertical")
+            st.success("Cambios guardados.")
             st.rerun()
+    else:
+        st.info("No hay datos cargados.")
 
-        # Exportación
+with menu[2]:
+    if len(st.session_state.data) > 0:
         st.header("3. Finalizar y exportar")
-        if st.button("🗑️ Limpiar registros 'cargado'"):
+        
+        if st.button("🗑️ Limpiar registros 'cargados'", help="Elimina los registros procesados de la lista actual"):
             st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
             st.rerun()
 
-        c1, c2 = st.columns(2)
-        c1.download_button("💾 Descargar .db", guardar_db_bytes(st.session_state.data), "base_actualizada.db", use_container_width=True)
-        c2.download_button("⬇️ Descargar .csv", st.session_state.data.write_csv(), "datos.csv", use_container_width=True)
-
-# --- TAB 2: IMPORTAR HOJA DE CÁLCULO (ODS) ---
-with menu[1]:
-    st.header("📥 Importar Hoja de Cálculo (Formato ODS)")
-    st.info("""
-    **Instrucciones del formato:**
-    1. La primera columna debe llamarse **'X'**.
-    2. Valores aceptados en 'X': `+` (cargado), `?` (revisar), `-` / `x` (otro distrito), vacío (pendiente).
-    """)
-    
-    ods_file = st.file_uploader("Seleccione archivo .ods", type=['ods'])
-    if ods_file:
-        if st.button("🚀 Procesar e Importar ODS"):
-            procesar_ods(ods_file)
-
-# --- TAB 3: CONFIGURACIÓN ---
-with menu[2]:
-    st.subheader("Estado de la Aplicación")
-    st.write(f"Registros en memoria: {len(st.session_state.data)}")
-    if st.button("🔥 Reset Total (Borrar memoria)"):
-        st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
-        st.rerun()
+        st.divider()
+        col_d1, col_d2 = st.columns(2)
+        
+        db_out = guardar_db_bytes(st.session_state.data)
+        col_d1.download_button("💾 Descargar .DB (SQLite)", data=db_out, file_name="gestion_epe.db")
+        
+        csv_out = st.session_state.data.write_csv().encode('utf-8')
+        col_d2.download_button("⬇️ Descargar .CSV", data=csv_out, file_name="gestion_epe.csv")
