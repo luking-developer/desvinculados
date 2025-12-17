@@ -13,7 +13,6 @@ from datetime import datetime
 # ==============================================================================
 
 DATE_FORMAT = '%Y-%m-%d'
-
 MONTH_MAPPING = {
     'ene': 1, 'feb': 2, 'mar': 3, 'abr': 4,
     'may': 5, 'jun': 6, 'jul': 7, 'ago': 8,
@@ -24,13 +23,12 @@ TRUE_VALUES = {'1', 't', 'true', 'si', 's'}
 ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
 FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS)
 
-# Mapeo específico para la columna "X" del ODS
-MAPEO_ESTADO_X = {
-    "+": "cargado",
-    "?": "revisar",
-    "x": "otro distrito",
-    None: "pendiente",
-    "": "pendiente"
+# Mapeo específico para ODS solicitado
+ODS_ESTADO_MAP = {
+    '+': 'cargado',
+    '?': 'revisar',
+    '': 'pendiente',
+    'x': 'otro distrito'
 }
 
 CSV_TO_DB_MAPPING = {
@@ -50,7 +48,7 @@ FINAL_SCHEMA = {
 }
 
 # ==============================================================================
-# 2. FUNCIONES DE LÓGICA DE NEGOCIO
+# 2. FUNCIONES DE LÓGICA
 # ==============================================================================
 
 def normalizar_fecha(fecha_str):
@@ -67,235 +65,175 @@ def normalizar_fecha(fecha_str):
                 return datetime(int(year), month_num, int(day)).strftime(DATE_FORMAT)
         datetime.strptime(clean_str, DATE_FORMAT)
         return clean_str 
-    except Exception:
-        return None 
+    except: return None 
 
 def fusionar_datos(df_nuevo):
-    """Lógica central para unir datos nuevos con lo que ya existe en sesión."""
+    """Lógica central para evitar duplicados al importar."""
     if st.session_state.data is not None and len(st.session_state.data) > 0:
         existing_df = st.session_state.data.select([pl.col(c).cast(t) for c, t in FINAL_SCHEMA.items()])
         df_combined = pl.concat([existing_df, df_nuevo], how="vertical")
         st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
     else:
-        st.session_state.data = df_nuevo
-    st.success(f"Datos integrados. Total actual: {len(st.session_state.data)} registros.")
+        st.session_state.data = df_nuevo.unique(subset=['nro_cli'], keep='first')
 
 def procesar_ods(uploaded_ods):
-    """Procesa archivo ODS con lógica de columna 'X' para el estado."""
+    """Carga ODS, mapea columna X a estado y procesa el resto."""
     try:
-        # Leemos con Pandas (motor odf) y pasamos a Polars
-        pdf = pd.read_excel(uploaded_ods, engine='odf')
-        df = pl.from_pandas(pdf)
+        # Nota: requiere 'odfpy' instalado
+        df_pd = pd.read_excel(uploaded_ods, engine='odf')
         
-        # 1. Renombrar columnas según el estándar
-        df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
-        
-        # 2. Lógica de la columna "X" para determinar el estado
-        if "X" in df.columns:
-            df = df.with_columns(
-                pl.col("X").map_elements(lambda x: MAPEO_ESTADO_X.get(str(x).strip() if x else "", "pendiente"), return_dtype=pl.Utf8).alias("estado")
-            )
-        else:
-            df = df.with_columns(pl.lit("pendiente").alias("estado"))
+        # Validar si es el formato correcto (Columna 1 = "X")
+        if df_pd.columns[0].upper() != "X":
+            st.error("Archivo ODS inválido: La primera columna debe llamarse 'X'.")
+            return
 
-        # 3. Normalizar resto de campos
+        # Mapeo de estados basado en el primer campo
+        # Se limpia el string y se busca en el diccionario, por defecto 'pendiente'
+        df_pd['estado'] = df_pd.iloc[:, 0].astype(str).str.strip().str.lower().map(ODS_ESTADO_MAP).fillna('pendiente')
+        
+        # Convertir a Polars y renombrar columnas restantes
+        df_pl = pl.from_pandas(df_pd)
+        df_pl = df_pl.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df_pl.columns})
+
+        # Normalización estándar
         hoy = datetime.now().strftime(DATE_FORMAT)
-        df = df.with_columns([
+        df_pl = df_pl.with_columns([
             pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8),
-            pl.lit(hoy).alias('fecha_intervencion'),
-            pl.when(pl.col('normalizado').cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES))
-              .then(pl.lit(1).cast(pl.Int64)).otherwise(pl.lit(0).cast(pl.Int64)).alias('normalizado')
-        ]).filter(pl.col('fecha_alta').is_not_null())
+            pl.lit(hoy).alias('fecha_intervencion')
+        ]).select([pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df_pl.columns])
 
-        # Asegurar esquema y fusionar
-        df = df.select([pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df.columns])
-        fusionar_datos(df)
+        fusionar_datos(df_pl)
+        st.success(f"ODS Importado. Total: {len(st.session_state.data)} registros.")
     except Exception as e:
         st.error(f"Error procesando ODS: {e}")
 
 def cargar_db(uploaded_file):
-    """Carga DB de disco a Polars DataFrame en memoria."""
-    conn = None
-    conn_disk = None
-    temp_file_path = None
-    
     db_bytes = uploaded_file.read()
-    
     try:
         temp_file_path = f"/tmp/{uuid.uuid4()}.db"
-        
-        with open(temp_file_path, "wb") as f:
-            f.write(db_bytes)
-            
+        with open(temp_file_path, "wb") as f: f.write(db_bytes)
         conn_disk = sqlite3.connect(temp_file_path)
         conn = sqlite3.connect(':memory:')
-
         conn_disk.backup(conn)
-        
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM desvinculados")
-        data = cursor.fetchall()
-        column_names = [description[0] for description in cursor.description]
-        
-        if not data:
-             st.warning("La tabla 'desvinculados' estaba vacía.")
-             schema = {col: pl.Utf8 for col in column_names}
-             df = pl.DataFrame({col: [] for col in column_names}, schema=schema)
-        else:
-             df = pl.DataFrame(data, schema=column_names)
-
-        df = df.with_columns(
-            pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT))
-        )
-        
-        st.session_state.data = df
+        df = pl.read_database("SELECT * FROM desvinculados", conn)
+        st.session_state.data = df.with_columns(pl.col('fecha_intervencion').fill_null(datetime.now().strftime(DATE_FORMAT)))
         st.session_state.db_cargada = True
-        st.success(f"Base de datos cargada con {len(df)} registros.")
-        
-    except sqlite3.OperationalError as e:
-        st.error(f"Error al leer la tabla 'desvinculados'. El archivo podría estar corrupto: {e}")
-        st.session_state.db_cargada = False
-    except Exception as e:
-        st.error(f"Error inesperado al cargar la DB: {e}")
-        st.session_state.db_cargada = False
+        st.success(f"DB cargada: {len(df)} registros.")
+    except Exception as e: st.error(f"Error DB: {e}")
     finally:
-        if conn_disk:
-             conn_disk.close()
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        if 'conn_disk' in locals(): conn_disk.close()
+        if 'temp_file_path' in locals() and os.path.exists(temp_file_path): os.remove(temp_file_path)
 
 def procesar_csv(uploaded_csv):
-    """Procesa y fusiona el CSV con los datos existentes (Polars)."""
     try:
-        df_csv = pl.read_csv(uploaded_csv, encoding='utf-8')
-        df_csv = df_csv.rename({k: v for k, v in CSV_TO_DB_MAPPING.items()})
-        
-        # Normalización de Fechas y Valores por defecto
-        df_csv = df_csv.with_columns(
-            pl.col('fecha_alta')
-              .map_elements(normalizar_fecha, return_dtype=pl.Utf8)
-              .alias('fecha_alta')
-        ).filter(pl.col('fecha_alta').is_not_null())
-        
-        df_csv = df_csv.with_columns(
-             pl.when(pl.col('normalizado').cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES))
-               .then(pl.lit(1).cast(pl.Int64))
-               .otherwise(pl.lit(0).cast(pl.Int64))
-               .alias('normalizado')
-        )
-        
+        df_csv = pl.read_csv(uploaded_csv)
+        df_csv = df_csv.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df_csv.columns})
         hoy = datetime.now().strftime(DATE_FORMAT)
         df_csv = df_csv.with_columns([
+            pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8),
             pl.lit('pendiente').alias('estado'),
             pl.lit(hoy).alias('fecha_intervencion')
-        ])
-        
-        # Asegurar esquema (CRÍTICO)
-        df_csv = df_csv.select(
-            [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df_csv.columns]
-        )
-
-        # Fusión
-        if st.session_state.data is not None and len(st.session_state.data) > 0:
-            existing_df = st.session_state.data.select(
-                [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items()]
-            )
-            df_combined = pl.concat([existing_df, df_csv], how="vertical")
-            # Usar unique para desduplicar por nro_cli
-            st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
-        else:
-            st.session_state.data = df_csv.unique(subset=['nro_cli'], keep='first')
-
-        st.success(f"CSV importado. Total de registros: {len(st.session_state.data)}.")
-
-    except Exception as e:
-        st.error(f"Error durante el procesamiento del CSV: {e}")
+        ]).select([pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df_csv.columns])
+        fusionar_datos(df_csv)
+        st.success("CSV cargado.")
+    except Exception as e: st.error(f"Error CSV: {e}")
 
 def guardar_db_bytes(df):
-    """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
     conn = sqlite3.connect(':memory:')
-    
-    # Escribir el DF de Polars a SQLite en memoria
-    try:
-        # Intentar con Polars writer (más eficiente)
-        df.write_database(
-            table_name='desvinculados', 
-            connection=conn, 
-            if_exists='replace',
-            database_driver='sqlite' 
-        )
-    except Exception:
-        # Fallback a Pandas si el writer de Polars falla
-        df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
-        
-    # Transferir de DB en memoria a archivo binario para la descarga
+    df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
     temp_file_path = f"/tmp/{uuid.uuid4()}.db"
     conn_disk = sqlite3.connect(temp_file_path)
     conn.backup(conn_disk)
     conn_disk.close()
-    
-    with open(temp_file_path, "rb") as f:
-        db_bytes = f.read()
-        
+    with open(temp_file_path, "rb") as f: b = f.read()
     os.remove(temp_file_path)
-    return db_bytes
+    return b
 
 # ==============================================================================
-# 3. INTERFAZ DE USUARIO
+# 3. INTERFAZ DE USUARIO (NAVEGACIÓN SUPERIOR)
 # ==============================================================================
 
 st.set_page_config(layout="wide", page_title="Gestor EPE")
 
-# --- NAVEGACIÓN ---
-with st.sidebar:
-    st.title("Navegación")
-    menu = st.radio("Ir a:", ["Panel Principal", "Importar hoja de cálculo"])
-
-# 1. Inicialización de sesión
+# Inicialización de estado
 if 'data' not in st.session_state:
     st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
 
-# --- VISTA: IMPORTAR HOJA DE CÁLCULO ---
-if menu == "Importar hoja de cálculo":
-    st.header("Importar datos desde ODS")
-    st.info("Esta opción procesa la columna 'X' para determinar el estado del registro (+, ?, x).")
-    ods_file = st.file_uploader("Subir archivo .ods", type=['ods'])
-    if ods_file:
-        procesar_ods(ods_file)
-    if st.button("Volver al Panel"):
-        st.rerun()
+# --- MENU DE NAVEGACIÓN SUPERIOR ---
+tab_principal, tab_importar = st.tabs(["🏠 Gestión Principal", "📊 Importar hoja de cálculo"])
 
-# --- VISTA: PANEL PRINCIPAL ---
-else:
-    st.title("⚡ Gestor Web de Desvinculados EPE")
+with tab_importar:
+    st.header("Importación de datos externos")
+    col_a, col_b = st.columns(2)
     
-    # 1. Carga de datos (DB y CSV original)
-    st.header("1. Carga de datos")
-    col1, col2 = st.columns(2)
-    with col1:
-        db_file = st.file_uploader("Cargar Base de Datos (.db)", type=['db', 'sqlite'])
-        if db_file: cargar_db()
-    with col2:
-        csv_file = st.file_uploader("Cargar CSV (estándar)", type=['csv'])
-        if csv_file: procesar_csv()
+    with col_a:
+        st.subheader("Carga ODS (Simbólico)")
+        st.info("Formato esperado: Columna 1='X' (+:cargado, ?:revisar, x:otro, vacio:pendiente)")
+        ods_file = st.file_uploader("Subir archivo .ods", type=['ods'], key="ods_uploader")
+        if ods_file:
+            procesar_ods(ods_file)
 
-    # 2. Gestión de registros (ABM + Filtro)
+    with col_b:
+        st.subheader("Carga CSV (Estándar)")
+        csv_file = st.file_uploader("Subir archivo .csv", type=['csv'], key="csv_uploader")
+        if csv_file:
+            procesar_csv(csv_file)
+
+with tab_principal:
+    st.header("Panel de Control")
+    
+    # Carga de DB inicial solo si está vacía la memoria
+    if len(st.session_state.data) == 0:
+        db_file = st.file_uploader("Cargar Base de Datos .db para empezar", type=['db', 'sqlite'])
+        if db_file: cargar_db(db_file)
+    
+    # --- Interfaz de ABM existente ---
     if len(st.session_state.data) > 0:
-        # ... [Insertar aquí toda la lógica de edición, filtro y botón 'Guardar cambios' del código base] ...
+        # (Aquí va toda tu lógica de filtrado, data_editor y guardado que ya tienes resuelta)
+        # Por brevedad, mantengo la estructura del ABM:
         
-        # 3. Finalizar y exportar
-        st.header("3. Finalizar y exportar")
+        filtro_estado = st.selectbox("Filtrar registros:", options=FILTRO_OPTIONS, index=FILTRO_OPTIONS.index('pendiente'))
+        df_to_edit = st.session_state.data.filter(pl.col('estado') == filtro_estado) if filtro_estado != "Todos los registros" else st.session_state.data
         
-        # Botón Limpiar 'cargado'
-        if st.button("🗑️ Eliminar registros con estado 'cargado'"):
-            st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
+        df_edit_pandas = df_to_edit.to_pandas()
+        # ... (Conversiones de fecha de tu código base)
+        df_edit_pandas['fecha_intervencion'] = pd.to_datetime(df_edit_pandas['fecha_intervencion'], errors='coerce').fillna(datetime.now().date())
+        df_edit_pandas['fecha_alta'] = pd.to_datetime(df_edit_pandas['fecha_alta'], errors='coerce').fillna(datetime.now().date())
+
+        edited_df_pandas = st.data_editor(
+            df_edit_pandas,
+            column_config={
+                "estado": st.column_config.SelectboxColumn("estado", options=list(ESTADOS), required=True),
+                "fecha_intervencion": st.column_config.DateColumn("fecha_intervencion", format=DATE_FORMAT)
+            },
+            disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'),
+            num_rows='dynamic', hide_index=True
+        )
+
+        if st.button("✅ Guardar cambios"):
+            # Lógica de guardado que ya tienes...
+            df_comm = pl.from_pandas(edited_df_pandas).filter(pl.col('nro_cli') > 0)
+            df_comm = df_comm.with_columns([
+                pl.col('fecha_intervencion').dt.strftime(DATE_FORMAT),
+                pl.col('fecha_alta').dt.strftime(DATE_FORMAT)
+            ])
+            nro_cli_comm = df_comm.get_column('nro_cli')
+            df_unaff = st.session_state.data.filter(~pl.col('nro_cli').is_in(nro_cli_comm))
+            st.session_state.data = pl.concat([df_unaff, df_comm], how="vertical")
+            st.success("Cambios guardados.")
             st.rerun()
 
         st.markdown("---")
+        st.header("3. Finalizar y exportar")
+        
+        # Botón de limpieza de 'cargados'
+        if st.button("🗑️ Eliminar registros 'cargado'"):
+            st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
+            st.rerun()
+
         c1, c2 = st.columns(2)
         with c1:
-            st.download_button("💾 Descargar .db", data=guardar_db_bytes(st.session_state.data), file_name='datos.db')
+            st.download_button("💾 Descargar DB", data=guardar_db_bytes(st.session_state.data), file_name="actualizado.db")
         with c2:
-            st.download_button("⬇️ Descargar .csv", data=st.session_state.data.write_csv(None).encode('utf-8'), file_name='datos.csv')
-    else:
-        st.info("Sin datos. Use la carga inicial o el menú lateral para importar un ODS.")
+            st.download_button("⬇️ Descargar CSV", data=st.session_state.data.write_csv().encode('utf-8'), file_name="actualizado.csv")
+            
