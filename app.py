@@ -101,8 +101,7 @@ def procesar_archivo_inteligente(uploaded_file):
             # PASO ITERADO: Forzamos la lectura de bytes pura con el motor 'odf' 
             # asegurándonos de que no haya punteros residuales.
             with io.BytesIO(raw_content) as bio:
-                pd_df = pd.read_excel(io.BytesIO(bio), engine='odf')
-                df = pl.from_pandas(pd_df)
+                df = pl.read_excel(io.BytesIO(bio), engine='odf')
             
             # Lógica Columna X
             primera_col = df.columns[0]
