@@ -26,10 +26,11 @@ ODS_ESTADO_MAP = {
     'x': 'otro distrito',
     '-': 'otro distrito',
     '': 'pendiente',
-    'nan': 'pendiente'
+    'nan': 'pendiente',
+    'none': 'pendiente'
 }
 
-TRUE_VALUES = {'1', 't', 'true', 'si', 's'} 
+TRUE_VALUES = {'1', 't', 'true', 'si', 's', 'true'} 
 ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
 FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS)
 
@@ -50,35 +51,39 @@ FINAL_SCHEMA = {
 }
 
 # ==============================================================================
-# 2. FUNCIONES DE LÓGICA (NÚCLEO)
+# 2. FUNCIONES DE LÓGICA (ITERADAS PARA ROBUSTEZ)
 # ==============================================================================
 
 def normalizar_fecha(fecha_str):
     if fecha_str is None or str(fecha_str).lower() in ['none', 'nan', '']:
         return datetime.now().strftime(DATE_FORMAT)
+    
     fs = str(fecha_str).lower().replace('.', '').strip()
     try:
+        # Intento de parseo de formato específico: "12 oct 2023"
         match = re.match(r'(\d{1,2})\s*([a-z]+)\s*(\d{4})', fs)
         if match:
             d, m_abbr, y = match.groups()
             m_num = MONTH_MAPPING.get(m_abbr)
-            if m_num: return f"{y}-{m_num:02d}-{int(d):02d}"
+            if m_num:
+                return f"{y}-{m_num:02d}-{int(d):02d}"
         return fs 
     except:
         return datetime.now().strftime(DATE_FORMAT)
 
 def procesar_archivo_inteligente(uploaded_file):
     """
-    IMPORTANTE: Se extraen los bytes ANTES de pasarlos a cualquier función.
-    Esto soluciona el error 'Expected bytes, got a int object'.
+    SOLUCIÓN DEFINITIVA AL ERROR: Expected bytes, got an 'int' object.
+    Se extrae el contenido binario ANTES de cualquier operación de Pandas/Polars.
     """
     try:
-        # Extraer el contenido crudo inmediatamente
-        raw_content = uploaded_file.getvalue() 
+        # EXTRACCIÓN CRÍTICA: Convertimos el archivo de Streamlit en un objeto Bytes puro.
+        # Esto mata la referencia al 'fileno' (el entero que causa el error).
+        raw_content = uploaded_file.getvalue()
         nombre = uploaded_file.name.lower()
         
         if nombre.endswith('.csv'):
-            # Usar io.BytesIO para Polars también por consistencia
+            # Usar BytesIO para que Polars no intente leer del disco
             df_raw = pl.read_csv(io.BytesIO(raw_content), infer_schema_length=10000)
             
             if 'NORMALIZADO' in df_raw.columns:
@@ -93,11 +98,11 @@ def procesar_archivo_inteligente(uploaded_file):
             if 'fecha_intervencion' not in df.columns: df = df.with_columns(pl.lit(hoy).alias('fecha_intervencion'))
             
         elif nombre.endswith('.ods'):
-            # FORZAR EXTRACCIÓN CON BYTESIO Y MOTOR ODF
-            with io.BytesIO(raw_content) as fh:
-                pd_df = pd.read_excel(fh, engine='odf')
-            
-            df = pl.from_pandas(pd_df)
+            # PASO ITERADO: Forzamos la lectura de bytes pura con el motor 'odf' 
+            # asegurándonos de que no haya punteros residuales.
+            with io.BytesIO(raw_content) as bio:
+                pd_df = pd.read_excel(bio, engine='odf')
+                df = pl.from_pandas(pd_df)
             
             # Lógica Columna X
             primera_col = df.columns[0]
@@ -109,10 +114,10 @@ def procesar_archivo_inteligente(uploaded_file):
                 ).drop(primera_col)
                 df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
             else:
-                st.error("El ODS debe tener 'X' en la primera columna.")
+                st.error("Encabezado de la columna 1 debe ser 'X'.")
                 return
 
-        # Normalizar fechas y asegurar esquema
+        # Normalización de esquema
         if 'fecha_alta' in df.columns:
             df = df.with_columns(pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8))
 
@@ -128,40 +133,41 @@ def procesar_archivo_inteligente(uploaded_file):
         else:
             st.session_state.data = df
             
-        st.success(f"Procesado: {len(df)} registros.")
+        st.success(f"Procesado: {len(df)} filas.")
         st.rerun()
 
     except Exception as e:
-        st.error(f"Error crítico: {e}")
+        st.error(f"Error procesando archivo: {e}")
 
 def cargar_db(uploaded_file):
     try:
-        temp_path = f"temp_{uuid.uuid4()}.db"
-        with open(temp_path, "wb") as f: f.write(uploaded_file.getvalue())
+        raw_db = uploaded_file.getvalue()
+        temp_path = f"/tmp/{uuid.uuid4()}.db"
+        with open(temp_path, "wb") as f: f.write(raw_db)
+        
         conn = sqlite3.connect(temp_path)
-        st.session_state.data = pl.read_database("SELECT * FROM desvinculados", conn)
+        df = pl.read_database("SELECT * FROM desvinculados", conn)
         conn.close()
         os.remove(temp_path)
-        st.success("Base de Datos cargada.")
+        
+        st.session_state.data = df
+        st.success("Base de datos cargada.")
     except Exception as e:
-        st.error(f"Error DB: {e}")
+        st.error(f"Fallo al cargar DB: {e}")
 
 def exportar_db(df):
     conn = sqlite3.connect(':memory:')
     df.to_pandas().to_sql('desvinculados', conn, if_exists='replace', index=False)
-    # Crear backup en memoria hacia bytes directamente
-    db_io = io.BytesIO()
-    temp_db = sqlite3.connect(f"export_{uuid.uuid4()}.db")
-    conn.backup(temp_db)
-    temp_db.close()
-    # Leer el archivo temporal creado
-    with open(temp_db.filename, "rb") as f:
-        data = f.read()
-    os.remove(temp_db.filename)
+    temp_path = f"/tmp/{uuid.uuid4()}.db"
+    disk_conn = sqlite3.connect(temp_path)
+    conn.backup(disk_conn)
+    disk_conn.close()
+    with open(temp_path, "rb") as f: data = f.read()
+    os.remove(temp_path)
     return data
 
 # ==============================================================================
-# 3. INTERFAZ (UI)
+# 3. INTERFAZ STREAMLIT
 # ==============================================================================
 
 st.set_page_config(layout="wide", page_title="Gestor EPE")
@@ -171,32 +177,31 @@ if 'data' not in st.session_state:
 
 st.title("⚡ EPE - Gestión de Desvinculados")
 
-tab_gestion, tab_ajustes = st.tabs(["📊 Gestión", "⚙️ Ajustes"])
+tab_principal, tab_sys = st.tabs(["📊 Gestión", "⚙️ Sistema"])
 
-with tab_gestion:
+with tab_principal:
     c1, c2 = st.columns(2)
     with c1:
-        f_db = st.file_uploader("📂 Cargar DB (.db)", type=['db', 'sqlite'])
+        f_db = st.file_uploader("📂 Cargar DB (.db)", type=['db', 'sqlite'], key="db_loader")
         if f_db: cargar_db(f_db)
     with c2:
-        f_in = st.file_uploader("📥 Importar hoja de cálculo (CSV o ODS)", type=['csv', 'ods'])
+        f_in = st.file_uploader("📥 Importar hoja de cálculo (CSV o ODS)", type=['csv', 'ods'], key="sheet_loader")
         if f_in: procesar_archivo_inteligente(f_in)
 
     st.divider()
 
     if len(st.session_state.data) > 0:
-        col_f, col_m = st.columns([3, 1])
+        col_f, col_s = st.columns([2, 1])
         with col_f:
-            filtro = st.selectbox("Vista actual:", FILTRO_OPTIONS, index=1)
-        with col_m:
-            st.metric("Total", len(st.session_state.data))
+            filtro = st.selectbox("Filtrar vista:", FILTRO_OPTIONS, index=1)
+        with col_s:
+            st.metric("Total registros", len(st.session_state.data))
 
-        df_edit = st.session_state.data.clone()
+        df_view = st.session_state.data.clone()
         if filtro != "Todos los registros":
-            df_edit = df_edit.filter(pl.col('estado') == filtro)
+            df_view = df_view.filter(pl.col('estado') == filtro)
 
-        # Preparar para editor
-        pdf = df_edit.to_pandas()
+        pdf = df_view.to_pandas()
         for c in ['fecha_intervencion', 'fecha_alta']:
             pdf[c] = pd.to_datetime(pdf[c], errors='coerce').dt.date
 
@@ -208,33 +213,35 @@ with tab_gestion:
             },
             disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'),
             num_rows='dynamic',
-            hide_index=True
+            hide_index=True,
+            key="main_editor"
         )
 
-        if st.button("💾 Guardar cambios"):
+        if st.button("💾 Aplicar cambios a la memoria"):
             res_pl = pl.from_pandas(new_pdf)
-            # Volver fechas a String para consistencia en la DB
             res_pl = res_pl.with_columns([pl.col(c).cast(pl.Utf8) for c in ['fecha_intervencion', 'fecha_alta']])
-            
-            # Fusión de los registros editados con el resto
-            ids = res_pl['nro_cli'].to_list()
-            st.session_state.data = pl.concat([
-                st.session_state.data.filter(~pl.col('nro_cli').is_in(ids)),
+            ids_editados = res_pl['nro_cli'].to_list()
+            final_df = pl.concat([
+                st.session_state.data.filter(~pl.col('nro_cli').is_in(ids_editados)),
                 res_pl
             ], how="vertical").filter(pl.col('nro_cli').is_not_null())
-            
-            st.success("Cambios aplicados.")
+            st.session_state.data = final_df
+            st.success("Cambios guardados.")
             st.rerun()
 
         st.divider()
+        st.subheader("3. Exportar resultados")
         bt1, bt2, bt3 = st.columns(3)
         with bt1:
-            st.download_button("💾 Bajar .DB", data=exportar_db(st.session_state.data), file_name="db_actualizada.db")
+            st.download_button("💾 Descargar DB", data=exportar_db(st.session_state.data), file_name="epe_data.db")
         with bt2:
-            st.download_button("📄 Bajar .CSV", data=st.session_state.data.write_csv().encode('utf-8'), file_name="reporte.csv")
+            st.download_button("📄 Descargar CSV", data=st.session_state.data.write_csv().encode('utf-8'), file_name="reporte_epe.csv")
         with bt3:
-            if st.button("🗑️ Eliminar 'cargados'", type="primary"):
+            if st.button("🗑️ Limpiar procesados ('cargado')", type="primary"):
                 st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
                 st.rerun()
     else:
-        st.info("Sin datos. Sube un archivo para comenzar.")
+        st.warning("Sin datos. Sube un archivo para comenzar.")
+
+with tab_sys:
+    st.info("Sistema listo para operar.")
