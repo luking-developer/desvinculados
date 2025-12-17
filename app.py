@@ -228,7 +228,7 @@ if len(st.session_state.data) > 0:
     
     st.header(f"2. Gestión de registros ({len(st.session_state.data)} en memoria)")
 
-    # 🚨 NUEVO: Selector de Filtro 
+    # 🚨 Selector de Filtro 
     filtro_estado = st.selectbox(
         "Filtrar registros:",
         options=FILTRO_OPTIONS,
@@ -283,7 +283,7 @@ if len(st.session_state.data) > 0:
     )
     
     # 🚨 Botón de Guardado Explícito (Commit)
-    if st.button("✅ Guardar cambios"):
+    if st.button("✅ Aplicar cambios y actualizar vista"):
         
         st.info("Procesando cambios...")
         
@@ -322,10 +322,31 @@ if len(st.session_state.data) > 0:
         # Forzar un nuevo render para actualizar el editor, el contador de registros y el filtro
         st.rerun() 
 
-    # 3.1 Descarga de Datos (DB y CSV)
-
+    # --------------------------------------------------------------------------
     st.header("3. Finalizar y exportar")
+    # --------------------------------------------------------------------------
     
+    # 🚨 Botón de Limpieza (siempre disponible)
+    if st.button("🗑️ Eliminar registros con estado 'cargado'", type="secondary"):
+        
+        df_original = st.session_state.data.clone()
+        initial_count = len(df_original)
+        
+        # Aplicar filtro: mantener solo los que NO son 'cargado'
+        df_limpio = df_original.filter(pl.col('estado') != 'cargado')
+        
+        deleted_count = initial_count - len(df_limpio)
+        
+        if deleted_count > 0:
+            st.session_state.data = df_limpio
+            st.success(f"Se eliminaron {deleted_count} registros con estado 'cargado'.")
+            st.rerun()
+        else:
+            st.warning("No se encontraron registros con estado 'cargado' para eliminar.")
+
+    # 3.1 Descarga de Datos (DB y CSV)
+    st.markdown("---") # Separador visual
+
     col1_footer, col2_footer = st.columns(2)
 
     with col1_footer:
@@ -336,8 +357,6 @@ if len(st.session_state.data) > 0:
             mime='application/octet-stream',
             help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
         )
-    
-    #st.markdown("---")
 
     with col2_footer:
         st.download_button(
