@@ -167,6 +167,55 @@ def procesar_csv(uploaded_csv):
     except Exception as e:
         st.error(f"Error durante el procesamiento del CSV: {e}")
 
+def procesar_ods_especifico(uploaded_file):
+    """
+    Procesa archivos ODS con mapeo de símbolos en la columna 'X'.
+    """
+    try:
+        # Extraer bytes crudos para evitar errores de puntero/descriptor
+        raw_bytes = uploaded_file.getvalue()
+        
+        # Pandas con motor odf es obligatorio aquí
+        pd_df = pd.read_excel(raw_bytes, engine='odf')
+        df = pl.from_pandas(pd_df)
+        
+        # Validar columna 'X'
+        col_x = df.columns[0]
+        if col_x.upper() != 'X':
+            st.error(f"Error: Se esperaba 'X' en la primera columna, se encontró '{col_x}'")
+            return None
+
+        # Diccionario de mapeo según tus reglas
+        mapeo_simbolos = {
+            '+': 'cargado',
+            '?': 'revisar',
+            'x': 'otro distrito',
+            '-': 'otro distrito'
+        }
+
+        # Aplicar transformación de estado
+        df = df.with_columns(
+            pl.col(col_x).cast(pl.Utf8).fill_null("")
+            .map_elements(
+                lambda s: mapeo_simbolos.get(s.strip().lower(), "pendiente"), 
+                return_dtype=pl.Utf8
+            ).alias("estado")
+        ).drop(col_x)
+
+        # Mapear el resto de columnas según tu diccionario CSV_TO_DB_MAPPING
+        df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
+
+        # Asegurar esquema y campos faltantes
+        for col, dtype in FINAL_SCHEMA.items():
+            if col not in df.columns:
+                df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
+        
+        return df.select([pl.col(c).cast(FINAL_SCHEMA[c]) for c in FINAL_SCHEMA.keys()])
+
+    except Exception as e:
+        st.error(f"Fallo crítico en ODS: {e}")
+        return None
+
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
     conn = sqlite3.connect(':memory:')
@@ -219,10 +268,30 @@ with col1:
         cargar_db(db_file)
 
 with col2:
-    csv_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv'])
-    if csv_file:
-        procesar_csv(csv_file)
-        
+    csv_or_ods_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv', 'ods'])
+    if csv_or_ods_file:
+        nombre = csv_or_ods_file.name.lower()
+        df_nuevo = None
+
+        if nombre.endswith('.csv'):
+            df_nuevo = procesar_csv(csv_or_ods_file)
+
+        elif nombre.endswith('.ods'):
+            df_nuevo = procesar_ods_especifico(csv_or_ods_file)
+
+        if df_nuevo is not None:
+            # Fusión con lo que ya está en memoria
+            if len(st.session_state.data) > 0:
+                st.session_state.data = pl.concat(
+                    [st.session_state.data, df_nuevo], 
+                    how="vertical"
+                ).unique(subset=['nro_cli'], keep='last')
+            else:
+                st.session_state.data = df_nuevo
+            
+        st.success(f"Se han cargado {len(df_nuevo)} registros.")
+        st.rerun()
+
 # --- Interfaz de ABM y Edición ---
 if len(st.session_state.data) > 0:
     
