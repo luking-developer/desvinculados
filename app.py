@@ -73,25 +73,39 @@ ODS_SCHEMA = {
 
 def normalizar_fecha(fecha_str):
     """Convierte cadena de fecha abreviada al formato 'YYYY-MM-DD'."""
-    if fecha_str is None or pl.Series([fecha_str]).is_null().item():
-        return datetime.now().strftime(DATE_FORMAT)
+    if fecha_str is None or str(fecha_str).strip() in ['', 'None', 'nan']:
+        return None # El valor por defecto se maneja en el DataFrame, no aquí
 
-    fecha_str = str(fecha_str) 
+    fecha_str = str(fecha_str).strip().lower()
+    
+    # 1. Intentar formatos estándar (dd/mm/yyyy y dd/mm/yy)
+    # Esto cubre tus nuevos requerimientos de forma eficiente
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(fecha_str, fmt).strftime(DATE_FORMAT)
+        except ValueError:
+            continue
+
+    # 2. Lógica para formato "12 oct 2023" o "12.oct.2023"
     try:
-        clean_str = fecha_str.lower().replace('.', '').strip()
-        match = re.match(r'(\d{1,2})\s*([a-z]+)\s*(\d{4})', clean_str)
+        clean_str = fecha_str.replace('.', '').strip()
+        # Regex mejorado: más flexible con espacios y separadores
+        match = re.match(r'(\d{1,2})[-/\s]*([a-z]+)[-/\s]*(\d{2,4})', clean_str)
         
         if match:
             day, month_abbr, year = match.groups()
-            month_num = MONTH_MAPPING.get(month_abbr, None)
+            month_num = MONTH_MAPPING.get(month_abbr[:3], None) # Tomar solo 3 letras
             
-            if month_num is not None:
-                normalized_date = datetime(int(year), month_num, int(day))
-                return normalized_date.strftime(DATE_FORMAT)
-
-        datetime.strptime(clean_str, DATE_FORMAT)
-        return clean_str 
-
+            if month_num:
+                # Manejo de año de 2 dígitos en el regex
+                year_int = int(year)
+                if year_int < 100:
+                    year_int += 2000
+                
+                return datetime(year_int, month_num, int(day)).strftime(DATE_FORMAT)
+        
+        # 3. Último recurso: intentar parsear lo que quede como el formato de salida
+        return datetime.strptime(clean_str, DATE_FORMAT).strftime(DATE_FORMAT)
     except Exception:
         return None 
 
