@@ -193,47 +193,61 @@ def procesar_csv(uploaded_csv):
     except Exception as e:
         st.error(f"Error durante el procesamiento del CSV: {e}")
 
+import polars as pl
+from datetime import datetime
+
 def procesar_ods(uploaded_ods):
-    """
-    Procesa archivos ODS usando un archivo temporal para evitar errores de puntero.
-    """
     try:
+        # 1. Carga (Asegúrate de que sea CSV si usas read_csv, o cambia a la librería correcta para ODS)
         df_ods = pl.read_csv(uploaded_ods, encoding='utf-8')
-        df_ods = df_ods.rename({k: v for k, v in ODS_ESTADO_MAP.items()})
+
+        # 2. Definir el mapeo excluyendo nulos/vacíos para el replace inicial
+        # Manejamos los vacíos por separado para mayor robustez
+        mapping_logic = {k: v for k, v in ODS_ESTADO_MAP.items() if k not in [None, '']}
         
-        # Normalización de Fechas y Valores por defecto
+        # 3. Transformación de la columna 'estado'
+        df_ods = df_ods.with_columns(
+            pl.col('estado')
+            .cast(pl.Utf8)
+            .replace(mapping_logic, default='pendiente') # Mapea y lo que no coincida es 'pendiente'
+            .fill_null('pendiente')                       # Cubre los None
+            .fill_empty('pendiente')                      # Cubre los strings vacíos ''
+            .alias('estado')
+        )
+
+        # 4. Normalización de Fechas (Mantenemos tu lógica pero filtramos)
         df_ods = df_ods.with_columns(
             pl.col('fecha_alta')
               .map_elements(normalizar_fecha, return_dtype=pl.Utf8)
-              .alias('fecha_alta')
         ).filter(pl.col('fecha_alta').is_not_null())
-        
+
+        # 5. Lógica de 'normalizado'
         df_ods = df_ods.with_columns(
              pl.when(pl.col('normalizado').cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES))
-               .then(pl.lit(1).cast(pl.Int64))
-               .otherwise(pl.lit(0).cast(pl.Int64))
+               .then(1)
+               .otherwise(0)
+               .cast(pl.Int64)
                .alias('normalizado')
         )
-        
+
+        # 6. Metadatos de auditoría (¡No sobreescribas 'estado' aquí!)
         hoy = datetime.now().strftime(DATE_FORMAT)
         df_ods = df_ods.with_columns([
-            pl.lit('pendiente').alias('estado'),
             pl.lit(hoy).alias('fecha_alta'),
             pl.lit(hoy).alias('fecha_intervencion')
         ])
-        
-        # Asegurar esquema
+
+        # 7. Selección y Esquema
         df_ods = df_ods.select(
             [pl.col(col).cast(dtype) for col, dtype in ODS_SCHEMA.items() if col in df_ods.columns]
         )
 
-        # Fusión
+        # 8. Fusión y Desduplicación (Correcto)
         if st.session_state.data is not None and len(st.session_state.data) > 0:
             existing_df = st.session_state.data.select(
                 [pl.col(col).cast(dtype) for col, dtype in ODS_SCHEMA.items()]
             )
             df_combined = pl.concat([existing_df, df_ods], how="vertical")
-            # Usar unique para desduplicar por nro_cli
             st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
         else:
             st.session_state.data = df_ods.unique(subset=['nro_cli'], keep='first')
@@ -241,48 +255,7 @@ def procesar_ods(uploaded_ods):
         st.success(f"ODS importado. Total de registros: {len(st.session_state.data)}.")
 
     except Exception as e:
-        st.error(f"Error durante el procesamiento del ODS: {e}")
-
-    ###
-    temp_path = None
-    try:
-        # Creamos archivo temporal físico
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ods") as tmp:
-            tmp.write(uploaded_ods.getvalue())
-            temp_path = tmp.name
-
-        pd_df = pd.read_excel(temp_path, engine='calamine')
-        df = pl.from_pandas(pd_df)
-        
-        if df.is_empty(): return None
-
-        col_x = df.columns[0]
-        if col_x.upper() != 'X':
-            st.error(f"Error: Primera columna debe ser 'X', se leyó '{col_x}'")
-            return None
-
-        # Mapeo de estados
-        df = df.with_columns(
-            pl.col(col_x).cast(pl.Utf8).fill_null("")
-            .map_elements(lambda s: ODS_ESTADO_MAP.get(s.strip().lower(), "pendiente"), return_dtype=pl.Utf8)
-            .alias("estado")
-        ).drop(col_x)
-
-        # Renombrado y esquema
-        df = df.rename({k: v for k, v in ODS_TO_DB_MAPPING.items() if k in df.columns})
-        
-        for col, dtype in ODS_SCHEMA.items():
-            if col not in df.columns:
-                df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
-        
-        return df.select([pl.col(c).cast(ODS_SCHEMA[c]) for c in ODS_SCHEMA.keys()])
-
-    except Exception as e:
-        st.error(f"Error en motor de lectura: {e}")
-        return None
-    finally:
-        if temp_path and os.path.exists(temp_path): os.remove(temp_path)
-    ###
+        st.error(f"Error crítico: {e}")
 
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
