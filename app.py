@@ -174,47 +174,33 @@ def procesar_ods(uploaded_file):
     """
     temp_path = None
     try:
-        # 1. Crear un archivo temporal real con nombre único
+        # Creamos archivo temporal físico
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ods") as tmp:
             tmp.write(uploaded_file.getvalue())
             temp_path = tmp.name
 
-        # 2. Leer el archivo desde la RUTA, no desde los bytes
-        # Esto elimina el error 'Expected bytes, got a int'
-        pd_df = pd.read_excel(temp_path, engine='odf')
+        # LEER USANDO CALAMINE (Mucho más robusto que ODFPY)
+        # Nota: Requiere 'pip install python-calamine'
+        pd_df = pd.read_excel(temp_path, engine='calamine')
         df = pl.from_pandas(pd_df)
         
-        if df.is_empty():
-            st.warning("El archivo ODS está vacío.")
-            return None
+        if df.is_empty(): return None
 
-        # 3. Lógica de la columna 'X' (Tu requerimiento específico)
         col_x = df.columns[0]
         if col_x.upper() != 'X':
-            st.error(f"Estructura inválida. Se esperaba 'X' en la columna 1, se recibió: '{col_x}'")
+            st.error(f"Error: Primera columna debe ser 'X', se leyó '{col_x}'")
             return None
 
-        # Mapeo de estados agresivo (limpiando espacios y basura)
-        mapeo_simbolos = {
-            '+': 'cargado',
-            '?': 'revisar',
-            'x': 'otro distrito',
-            '-': 'otro distrito'
-        }
-
-        # Aplicar transformación
+        # Mapeo de estados
         df = df.with_columns(
             pl.col(col_x).cast(pl.Utf8).fill_null("")
-            .map_elements(
-                lambda s: mapeo_simbolos.get(s.strip().lower(), "pendiente"), 
-                return_dtype=pl.Utf8
-            ).alias("estado")
+            .map_elements(lambda s: ODS_ESTADO_MAP.get(s.strip().lower(), "pendiente"), return_dtype=pl.Utf8)
+            .alias("estado")
         ).drop(col_x)
 
-        # 4. Renombrado y Normalización de esquema
+        # Renombrado y esquema
         df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
-
-        # Asegurar que todas las columnas del esquema final existan (aunque sean nulas)
+        
         for col, dtype in FINAL_SCHEMA.items():
             if col not in df.columns:
                 df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
@@ -222,12 +208,10 @@ def procesar_ods(uploaded_file):
         return df.select([pl.col(c).cast(FINAL_SCHEMA[c]) for c in FINAL_SCHEMA.keys()])
 
     except Exception as e:
-        st.error(f"Error técnico en el motor ODS: {e}")
+        st.error(f"Error en motor de lectura: {e}")
         return None
     finally:
-        # SIEMPRE limpiar el rastro en el servidor
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path and os.path.exists(temp_path): os.remove(temp_path)
 
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
@@ -284,28 +268,15 @@ with col2:
     csv_ods_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv', 'ods'])
     if csv_ods_file:
         nombre_archivo = csv_ods_file.name.lower()
-        df_nuevo = None
-
-        with st.spinner("Procesando archivo..."):
-            if nombre_archivo.endswith('.csv'):
-                df_nuevo = procesar_csv(csv_ods_file) 
-            elif nombre_archivo.endswith('.ods'):
-                df_nuevo = procesar_ods(csv_ods_file)
-
+        df_nuevo = procesar_csv(csv_ods_file) if nombre_archivo.endswith('.csv') else procesar_ods(csv_ods_file)
+        
         if df_nuevo is not None:
-            # Fusión (Merge)
             if len(st.session_state.data) > 0:
-                st.session_state.data = pl.concat(
-                    [st.session_state.data, df_nuevo], 
-                    how="vertical"
-                ).unique(subset=['nro_cli'], keep='last')
+                st.session_state.data = pl.concat([st.session_state.data, df_nuevo], how="vertical").unique(subset=['nro_cli'], keep='last')
             else:
                 st.session_state.data = df_nuevo
-                
-            st.success(f"Éxito: {len(df_nuevo)} registros procesados.")
+            st.success(f"Cargados {len(df_nuevo)} registros.")
             st.rerun()
-        else:
-            st.error("La importación falló. Revisa el formato del archivo o los logs.")
 
 # --- Interfaz de ABM y Edición ---
 if len(st.session_state.data) > 0:
