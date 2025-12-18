@@ -200,7 +200,7 @@ def guardar_db_bytes(df):
 # 3. INTERFAZ DE USUARIO (STREAMLIT)
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Gestor EPE")
+st.set_page_config(layout="wide", page_title="Desvinculados", page_icon="⚡")
 st.title("⚡ Gestor Web de Desvinculados EPE")
 
 # 1. Inicialización del estado de sesión
@@ -279,7 +279,8 @@ if len(st.session_state.data) > 0:
         disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), # nro_cli removido de disabled
         num_rows='dynamic', 
         hide_index=True,
-        key="data_editor_polars"
+        key="data_editor_polars",
+        placeholder=""
     )
     
     # 🚨 Botón de Guardado Explícito (Commit)
@@ -330,22 +331,26 @@ if len(st.session_state.data) > 0:
 
     with col1_footer:
         st.download_button(
-            label="💾 Descargar Base de Datos (.db)",
+            label="💾 Descargar Base de Datos",
             data=guardar_db_bytes(st.session_state.data),
             file_name='desvinculados_actualizado.db',
             mime='application/octet-stream',
-            help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV."
+            help="Guarda la base de datos actualizada con los cambios de edición y los registros CSV.",
+            width="stretch",
+            shortcut="Ctrl+D"
         )
     
     #st.markdown("---")
 
     with col2_footer:
         st.download_button(
-            label="⬇️ Descargar CSV (opcional)",
+            label="⬇️ Descargar CSV",
             data=st.session_state.data.write_csv(None).encode('utf-8'),
             file_name='desvinculados_actualizado.csv',
             mime='text/csv',
-            help="Descarga los datos en formato CSV (más compatible con entornos web)."
+            help="Descarga los datos en formato CSV.",
+            width="stretch",
+            shortcut="Ctrl+S"
         )
     
     # 3.2 Envío por Email (Lógica Pendiente)
