@@ -114,7 +114,7 @@ def procesar_archivo_inteligente(uploaded_file):
 # 3. INTERFAZ Y ESTADO
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="SISTEMA EPE")
+st.set_page_config(layout="wide", page_title="Desvinculados", page_icon="⚡")
 
 if 'data' not in st.session_state:
     st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
@@ -122,7 +122,7 @@ if 'data' not in st.session_state:
 st.title("⚡ Gestión de Desvinculados")
 
 # El visor y el botón deben estar en la misma pestaña según tu pedido
-tab_unica = st.tabs(["Gestión de Datos"])[0]
+tab_unica = st.tabs(["Gestión de datos"])[0]
 
 with tab_unica:
     c1, c2 = st.columns(2)
