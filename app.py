@@ -41,7 +41,12 @@ CSV_TO_DB_MAPPING = {
     'DOMICILIO_COMERCIAL': 'domicilio', 'NORMALIZADO': 'normalizado', 'FECHA_ALTA': 'fecha_alta'
 }
 
-FINAL_SCHEMA = {
+ODS_TO_DB_MAPPING = {
+    'X': 'estado', 'NRO CLI': 'nro_cli', 'NRO MED': 'nro_med', 'USUARIO': 'usuario',
+    'DOMICILIO': 'domicilio', 'N': 'normalizado', 'FECHA INTERVENCION': 'fecha_intervencion'
+}
+
+CSV_SCHEMA = {
     'nro_cli': pl.Int64, # Clave primaria para el merge
     'nro_med': pl.Int64,
     'usuario': pl.Utf8,
@@ -50,6 +55,16 @@ FINAL_SCHEMA = {
     'fecha_alta': pl.Utf8, 
     'fecha_intervencion': pl.Utf8,
     'estado': pl.Utf8
+}
+
+ODS_SCHEMA = {
+    'X': pl.Utf8,
+    'NRO CLI': pl.Int64,
+    'NRO MED': pl.Int64,
+    'USUARIO': pl.Utf8,
+    'DOMICILIO': pl.Utf8,
+    'N': pl.Int64,
+    'FECHA INTERVENCION': pl.Utf8
 }
 
 # ==============================================================================
@@ -157,15 +172,15 @@ def procesar_csv(uploaded_csv):
             pl.lit(hoy).alias('fecha_intervencion')
         ])
         
-        # Asegurar esquema (CRÍTICO)
+        # Asegurar esquema
         df_csv = df_csv.select(
-            [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items() if col in df_csv.columns]
+            [pl.col(col).cast(dtype) for col, dtype in CSV_SCHEMA.items() if col in df_csv.columns]
         )
 
         # Fusión
         if st.session_state.data is not None and len(st.session_state.data) > 0:
             existing_df = st.session_state.data.select(
-                [pl.col(col).cast(dtype) for col, dtype in FINAL_SCHEMA.items()]
+                [pl.col(col).cast(dtype) for col, dtype in CSV_SCHEMA.items()]
             )
             df_combined = pl.concat([existing_df, df_csv], how="vertical")
             # Usar unique para desduplicar por nro_cli
@@ -178,19 +193,64 @@ def procesar_csv(uploaded_csv):
     except Exception as e:
         st.error(f"Error durante el procesamiento del CSV: {e}")
 
-def procesar_ods(uploaded_file):
+def procesar_ods(uploaded_ods):
     """
     Procesa archivos ODS usando un archivo temporal para evitar errores de puntero.
     """
+    try:
+        df_ods = pl.read_csv(uploaded_ods, encoding='utf-8')
+        df_ods = df_ods.rename({k: v for k, v in ODS_ESTADO_MAP.items()})
+        
+        # Normalización de Fechas y Valores por defecto
+        df_ods = df_ods.with_columns(
+            pl.col('fecha_alta')
+              .map_elements(normalizar_fecha, return_dtype=pl.Utf8)
+              .alias('fecha_alta')
+        ).filter(pl.col('fecha_alta').is_not_null())
+        
+        df_ods = df_ods.with_columns(
+             pl.when(pl.col('normalizado').cast(pl.Utf8).str.to_lowercase().is_in(TRUE_VALUES))
+               .then(pl.lit(1).cast(pl.Int64))
+               .otherwise(pl.lit(0).cast(pl.Int64))
+               .alias('normalizado')
+        )
+        
+        hoy = datetime.now().strftime(DATE_FORMAT)
+        df_ods = df_ods.with_columns([
+            pl.lit('pendiente').alias('estado'),
+            pl.lit(hoy).alias('fecha_alta'),
+            pl.lit(hoy).alias('fecha_intervencion')
+        ])
+        
+        # Asegurar esquema
+        df_ods = df_ods.select(
+            [pl.col(col).cast(dtype) for col, dtype in ODS_SCHEMA.items() if col in df_ods.columns]
+        )
+
+        # Fusión
+        if st.session_state.data is not None and len(st.session_state.data) > 0:
+            existing_df = st.session_state.data.select(
+                [pl.col(col).cast(dtype) for col, dtype in ODS_SCHEMA.items()]
+            )
+            df_combined = pl.concat([existing_df, df_ods], how="vertical")
+            # Usar unique para desduplicar por nro_cli
+            st.session_state.data = df_combined.unique(subset=['nro_cli'], keep='first')
+        else:
+            st.session_state.data = df_ods.unique(subset=['nro_cli'], keep='first')
+
+        st.success(f"ODS importado. Total de registros: {len(st.session_state.data)}.")
+
+    except Exception as e:
+        st.error(f"Error durante el procesamiento del ODS: {e}")
+
+    ###
     temp_path = None
     try:
         # Creamos archivo temporal físico
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ods") as tmp:
-            tmp.write(uploaded_file.getvalue())
+            tmp.write(uploaded_ods.getvalue())
             temp_path = tmp.name
 
-        # LEER USANDO CALAMINE (Mucho más robusto que ODFPY)
-        # Nota: Requiere 'pip install python-calamine'
         pd_df = pd.read_excel(temp_path, engine='calamine')
         df = pl.from_pandas(pd_df)
         
@@ -209,19 +269,20 @@ def procesar_ods(uploaded_file):
         ).drop(col_x)
 
         # Renombrado y esquema
-        df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
+        df = df.rename({k: v for k, v in ODS_TO_DB_MAPPING.items() if k in df.columns})
         
-        for col, dtype in FINAL_SCHEMA.items():
+        for col, dtype in ODS_SCHEMA.items():
             if col not in df.columns:
                 df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
         
-        return df.select([pl.col(c).cast(FINAL_SCHEMA[c]) for c in FINAL_SCHEMA.keys()])
+        return df.select([pl.col(c).cast(ODS_SCHEMA[c]) for c in ODS_SCHEMA.keys()])
 
     except Exception as e:
         st.error(f"Error en motor de lectura: {e}")
         return None
     finally:
         if temp_path and os.path.exists(temp_path): os.remove(temp_path)
+    ###
 
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
@@ -263,7 +324,7 @@ st.title("⚡ Gestor Web de Desvinculados EPE")
 if 'db_cargada' not in st.session_state:
     st.session_state.db_cargada = False
 if 'data' not in st.session_state:
-    st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
+    st.session_state.data = pl.DataFrame({}, schema=CSV_SCHEMA)
     
 # --- Controles de Carga ---
 st.header("1. Carga de datos")
@@ -325,7 +386,7 @@ if len(st.session_state.data) > 0:
         st.error(f"Fallo grave al convertir columnas de fecha: {e}")
         
     # Llenar valores NaT (inválidos o nulos) con la fecha de hoy para la interfaz
-    hoy_datetime = datetime.now().date() 
+    hoy_datetime = datetime.now().date()
     df_edit_pandas['fecha_intervencion'] = df_edit_pandas['fecha_intervencion'].fillna(hoy_datetime)
     df_edit_pandas['fecha_alta'] = df_edit_pandas['fecha_alta'].fillna(hoy_datetime)
     
