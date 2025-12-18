@@ -429,4 +429,4 @@ if len(st.session_state.data) > 0:
     #""")
     
 else:
-    st.info("Por favor, cargue una Base de Datos existente o un CSV para comenzar a trabajar.")
+    st.info("Por favor, cargue una Base de Datos existente, o un CSV u ODS para comenzar a trabajar.")
