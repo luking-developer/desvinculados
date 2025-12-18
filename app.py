@@ -5,6 +5,7 @@ import pandas as pd
 import io
 import os 
 import re
+import tempfile
 import uuid 
 from datetime import datetime
 
@@ -167,45 +168,40 @@ def procesar_csv(uploaded_csv):
     except Exception as e:
         st.error(f"Error durante el procesamiento del CSV: {e}")
 
-def procesar_ods_especifico(uploaded_file):
+def procesar_ods(uploaded_file):
     """
-    Procesa archivos ODS con mapeo de símbolos en la columna 'X'.
+    Procesa archivos ODS usando un archivo temporal para evitar errores de puntero.
     """
+    temp_path = None
     try:
-        # Extraer bytes crudos para evitar errores de puntero/descriptor
-        raw_bytes = uploaded_file.getvalue()
-        
-        # Pandas con motor odf es obligatorio aquí
-        pd_df = pd.read_excel(raw_bytes, engine='odf')
+        # 1. Crear un archivo temporal real en el disco del servidor
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ods") as tmp:
+            tmp.write(uploaded_file.getvalue())
+            temp_path = tmp.name
+
+        # 2. Leer el archivo desde la ruta del disco (no desde memoria)
+        # Esto elimina el error "Expected bytes, got a 'int' object"
+        pd_df = pd.read_excel(temp_path, engine='odf')
         df = pl.from_pandas(pd_df)
         
-        # Validar columna 'X'
+        # 3. Lógica de la columna X
         col_x = df.columns[0]
         if col_x.upper() != 'X':
-            st.error(f"Error: Se esperaba 'X' en la primera columna, se encontró '{col_x}'")
+            st.error(f"Error: La primera columna debe ser 'X', se encontró '{col_x}'")
             return None
 
-        # Diccionario de mapeo según tus reglas
-        mapeo_simbolos = {
-            '+': 'cargado',
-            '?': 'revisar',
-            'x': 'otro distrito',
-            '-': 'otro distrito'
-        }
+        mapeo_simbolos = {'+': 'cargado', '?': 'revisar', 'x': 'otro distrito', '-': 'otro distrito'}
 
-        # Aplicar transformación de estado
+        # Transformación de estado y mapeo de columnas
         df = df.with_columns(
             pl.col(col_x).cast(pl.Utf8).fill_null("")
-            .map_elements(
-                lambda s: mapeo_simbolos.get(s.strip().lower(), "pendiente"), 
-                return_dtype=pl.Utf8
-            ).alias("estado")
+            .map_elements(lambda s: mapeo_simbolos.get(s.strip().lower(), "pendiente"), return_dtype=pl.Utf8)
+            .alias("estado")
         ).drop(col_x)
 
-        # Mapear el resto de columnas según tu diccionario CSV_TO_DB_MAPPING
         df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
 
-        # Asegurar esquema y campos faltantes
+        # Asegurar esquema completo
         for col, dtype in FINAL_SCHEMA.items():
             if col not in df.columns:
                 df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
@@ -215,6 +211,10 @@ def procesar_ods_especifico(uploaded_file):
     except Exception as e:
         st.error(f"Fallo crítico en ODS: {e}")
         return None
+    finally:
+        # 4. Limpieza: Eliminar el archivo temporal siempre
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def guardar_db_bytes(df):
     """Convierte el Polars DataFrame a un archivo DB binario para descarga."""
@@ -268,19 +268,18 @@ with col1:
         cargar_db(db_file)
 
 with col2:
-    csv_or_ods_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv', 'ods'])
-    if csv_or_ods_file:
-        nombre = csv_or_ods_file.name.lower()
+    csv_ods_file = st.file_uploader("Cargar Archivo CSV para nuevos registros", type=['csv', 'ods'])
+    if csv_ods_file:
+        nombre = csv_ods_file.name.lower()
         df_nuevo = None
 
         if nombre.endswith('.csv'):
-            df_nuevo = procesar_csv(csv_or_ods_file)
+            df_nuevo = procesar_csv(csv_ods_file)
 
         elif nombre.endswith('.ods'):
-            df_nuevo = procesar_ods_especifico(csv_or_ods_file)
+            df_nuevo = procesar_ods(csv_ods_file)
 
         if df_nuevo is not None:
-            # Fusión con lo que ya está en memoria
             if len(st.session_state.data) > 0:
                 st.session_state.data = pl.concat(
                     [st.session_state.data, df_nuevo], 
@@ -288,9 +287,11 @@ with col2:
                 ).unique(subset=['nro_cli'], keep='last')
             else:
                 st.session_state.data = df_nuevo
-            
-        st.success(f"Se han cargado {len(df_nuevo)} registros.")
-        st.rerun()
+                
+            st.success(f"Se han cargado {len(df_nuevo)} registros correctamente.")
+            st.rerun()
+        else:
+            st.error("No se pudieron procesar los datos del archivo.")
 
 # --- Interfaz de ABM y Edición ---
 if len(st.session_state.data) > 0:
