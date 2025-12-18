@@ -117,7 +117,7 @@ def cargar_db(uploaded_file):
         
         st.session_state.data = df
         st.session_state.db_cargada = True
-        st.success(f"Base de datos cargada con {len(df)} {"registro" if len(df) == 1 else "registros"}.")
+        st.success(f"Base de datos cargada con {len(df)} {'registro' if len(df) == 1 else 'registros'}.")
         
     except sqlite3.OperationalError as e:
         st.error(f"Error al leer la tabla 'desvinculados'. El archivo podría estar corrupto: {e}")
