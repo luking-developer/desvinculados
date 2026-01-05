@@ -5,6 +5,7 @@ import pandas as pd
 import io
 import os 
 import re
+import tempfile
 import uuid 
 import zipfile
 from datetime import datetime
@@ -21,6 +22,7 @@ MONTH_MAPPING = {
     'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dic': 12
 }
 
+# Mapeo específico para archivos ODS (Columna X)
 ODS_ESTADO_MAP = {
     '+': 'cargado',
     '?': 'revisar',
@@ -31,7 +33,7 @@ ODS_ESTADO_MAP = {
 
 TRUE_VALUES = {'1', 't', 'true', 'si', 's'} 
 ESTADOS = ('cargado', 'pendiente', 'revisar', 'otro distrito')
-FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS)
+FILTRO_OPTIONS = ["Todos los registros"] + list(ESTADOS) # Opciones de filtro de vista
 
 class ColumnMapper:
     def __init__(self, mapping: dict):
@@ -64,6 +66,16 @@ FINAL_SCHEMA = {
     'fecha_alta': pl.Utf8, 
     'fecha_intervencion': pl.Utf8,
     'estado': pl.Utf8
+}
+
+ODS_SCHEMA = {
+    'X': pl.Utf8,
+    'NRO CLI': pl.Int64,
+    'NRO MED': pl.Int64,
+    'USUARIO': pl.Utf8,
+    'DOMICILIO': pl.Utf8,
+    'N': pl.Int64,
+    'FECHA INTERVENCION': pl.Utf8
 }
 
 # ==============================================================================
@@ -159,6 +171,13 @@ def exportar_todo(df):
     return zip_buf.getvalue()
 
 def cargar_db(uploaded_file):
+    """Carga DB de disco a Polars DataFrame en memoria."""
+    conn = None
+    conn_disk = None
+    temp_file_path = None
+    
+    db_bytes = uploaded_file.read()
+    
     try:
         temp_path = f"/tmp/{uuid.uuid4()}.db"
         with open(temp_path, "wb") as f: f.write(uploaded_file.getvalue())
