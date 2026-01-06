@@ -52,7 +52,9 @@ CSV_TO_DB_MAPPING = {
     'FULLNAME': 'usuario',
     'DOMICILIO_COMERCIAL': 'domicilio', 
     'NORMALIZADO': 'normalizado', 
-    'FECHA_ALTA': 'fecha_alta'
+    'FECHA_ALTA': 'fecha_alta',
+    'FECHA_INTERVENCION': 'fecha_intervencion',
+    'ESTADO': 'estado'
 }
 
 mapper = ColumnMapper(CSV_TO_DB_MAPPING)
