@@ -233,7 +233,7 @@ with t1:
 
         st.divider()
         # col_ex, col_cl = st.columns([2, 1])
-        col_ex = st.columns(1)
+        col_ex = st.columns([1])
         with col_ex:
             st.download_button("📦 Descargar todo (DB + CSV)", data=exportar_todo(st.session_state.data), file_name="desvinculados_epe.zip", mime="application/zip", use_container_width=True)
         # with col_cl:
