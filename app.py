@@ -212,7 +212,7 @@ with t1:
 
     if len(st.session_state.data) > 0:
         st.divider()
-        filtro = st.selectbox("Vista:", FILTRO_OPTIONS, index=1)
+        filtro = st.selectbox("Vista:", FILTRO_OPTIONS, index=2)
         df_v = st.session_state.data.clone()
         if filtro != "Todos los registros": df_v = df_v.filter(pl.col('estado') == filtro)
 
