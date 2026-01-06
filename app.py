@@ -168,8 +168,8 @@ def exportar_todo(df):
     # 3. ZIP
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
-        zf.writestr("base_datos.db", db_bytes)
-        zf.writestr("reporte_mapeado.csv", csv_bytes)
+        zf.writestr("desvinculados.db", db_bytes)
+        zf.writestr("desvinculados.csv", csv_bytes)
     return zip_buf.getvalue()
 
 def cargar_db(uploaded_file):
@@ -187,7 +187,7 @@ def cargar_db(uploaded_file):
         st.session_state.data = pl.read_database("SELECT * FROM desvinculados", conn)
         conn.close()
         os.remove(temp_path)
-        st.success("DB Cargada.")
+        st.success("Base de datos cargada.")
     except Exception as e: st.error(f"Error DB: {e}")
 
 # ==============================================================================
