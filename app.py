@@ -221,23 +221,25 @@ with t1:
         
         edited = st.data_editor(pdf, column_config={
             "estado": st.column_config.SelectboxColumn("estado", options=ESTADOS, required=True),
-            "fecha_intervencion": st.column_config.DateColumn("fecha_intervencion", format="YYYY-MM-DD")
+            # "fecha_intervencion": st.column_config.DateColumn("fecha_intervencion", format="YYYY-MM-DD")
+            "fecha_intervencion": st.column_config.DateColumn("fecha_intervencion", format="DD-MM-YYYY")
         }, disabled=('nro_med', 'usuario', 'domicilio', 'normalizado', 'fecha_alta'), num_rows='dynamic', hide_index=True)
 
-        if st.button("💾 Aplicar Cambios"):
+        if st.button("💾 Aplicar cambios"):
             res = pl.from_pandas(edited).with_columns([pl.col(c).cast(pl.Utf8) for c in ['fecha_intervencion', 'fecha_alta']])
             st.session_state.data = pl.concat([st.session_state.data.filter(~pl.col('nro_cli').is_in(res['nro_cli'])), res], how="vertical").filter(pl.col('nro_cli').is_not_null())
             st.success("Guardado.")
             st.rerun()
 
         st.divider()
-        col_ex, col_cl = st.columns([2, 1])
+        # col_ex, col_cl = st.columns([2, 1])
+        col_ex = st.columns(1)
         with col_ex:
-            st.download_button("📦 Descargar Todo (DB + CSV)", data=exportar_todo(st.session_state.data), file_name="export_epe.zip", mime="application/zip", use_container_width=True)
-        with col_cl:
-            if st.button("🗑️ Limpiar 'cargado'", type="primary", use_container_width=True):
-                st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
-                st.rerun()
+            st.download_button("📦 Descargar todo (DB + CSV)", data=exportar_todo(st.session_state.data), file_name="desvinculados_epe.zip", mime="application/zip", use_container_width=True)
+        # with col_cl:
+        #     if st.button("🗑️ Limpiar 'cargado'", type="primary", use_container_width=True):
+        #         st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
+        #         st.rerun()
 
 with t2:
     st.info("Sistema Operativo.")
