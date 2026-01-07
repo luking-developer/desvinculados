@@ -199,7 +199,8 @@ if 'data' not in st.session_state: st.session_state.data = pl.DataFrame({}, sche
 
 st.title("⚡ EPE - Gestión de Desvinculados")
 
-t1, t2 = st.tabs(["📊 Gestión", "⚙️ Sistema"])
+# t1, t2 = st.tabs(["📊 Gestión", "⚙️ Sistema"])
+t1 = st.tabs(["📊 Gestión"])
 
 with t1:
     c1, c2 = st.columns(2)
@@ -235,11 +236,12 @@ with t1:
         # col_ex, col_cl = st.columns([2, 1])
         col_ex = st.columns(1)[0]
         with col_ex:
-            st.download_button("📦 Descargar todo (DB + CSV)", data=exportar_todo(st.session_state.data), file_name="desvinculados_epe.zip", mime="application/zip", use_container_width=True)
+            st.download_button("📦 Descargar todo", data=exportar_todo(st.session_state.data), file_name="desvinculados_epe.zip", mime="application/zip", use_container_width=True)
+            st.info("Obtener un archivo ZIP con la base de datos y el CSV.")
         # with col_cl:
         #     if st.button("🗑️ Limpiar 'cargado'", type="primary", use_container_width=True):
         #         st.session_state.data = st.session_state.data.filter(pl.col('estado') != 'cargado')
         #         st.rerun()
 
-with t2:
-    st.info("Sistema Operativo.")
+# with t2:
+#     st.info("Sistema Operativo.")
