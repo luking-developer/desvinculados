@@ -200,7 +200,7 @@ if 'data' not in st.session_state: st.session_state.data = pl.DataFrame({}, sche
 st.title("⚡ EPE - Gestión de Desvinculados")
 
 # t1, t2 = st.tabs(["📊 Gestión", "⚙️ Sistema"])
-t1 = st.tabs(["📊 Gestión"])
+t1 = st.tabs(["📊 Gestión"])[0]
 
 with t1:
     c1, c2 = st.columns(2)
