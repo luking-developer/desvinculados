@@ -104,6 +104,7 @@ def procesar_archivo_inteligente(uploaded_file):
         nombre = uploaded_file.name.lower()
         hoy = datetime.now().strftime(DATE_FORMAT)
         
+        # 1. Carga inicial según formato
         if nombre.endswith('.csv'):
             df = pl.read_csv(io.BytesIO(raw_content), infer_schema_length=10000)
             if 'NORMALIZADO' in df.columns:
@@ -114,45 +115,57 @@ def procesar_archivo_inteligente(uploaded_file):
             with io.BytesIO(raw_content) as bio:
                 pd_df = pd.read_excel(bio, engine='odf')
                 df = pl.from_pandas(pd_df)
-            
-            primera_col = df.columns[0]
-            if primera_col.upper() == 'X':
-                df = df.with_columns(
-                    pl.col(primera_col).cast(pl.Utf8).fill_null('').str.strip_chars().str.to_lowercase()
-                    .map_elements(lambda x: ODS_ESTADO_MAP.get(x, 'pendiente'), return_dtype=pl.Utf8)
-                    .alias('estado')
-                ).drop(primera_col)
-                df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
 
-        # --- Lógica de Estado (REQUERIMIENTO: Copiar si existe, sino 'pendiente') ---
+        # --- Lógica de Mapeo de Columna "X" ---
+        # Buscamos si existe una columna que se llame exactamente "X" (independientemente de mayúsculas/minúsculas)
+        col_x = next((c for c in df.columns if c.upper() == 'X'), None)
+        
+        if col_x:
+            # Definimos el mapeo (incluyendo el vacío como pendiente)
+            # Usamos replace para mayor velocidad en Polars
+            df = df.with_columns(
+                pl.col(col_x).cast(pl.Utf8).fill_null('')
+                .str.strip_chars()
+                .replace(ODS_ESTADO_MAP, default='pendiente')
+                .alias('estado')
+            )
+            # Eliminamos la columna original "X" si no se llama "estado"
+            if col_x != 'estado':
+                df = df.drop(col_x)
+            
+            # Renombrar el resto de columnas según el mapping
+            df = df.rename({k: v for k, v in CSV_TO_DB_MAPPING.items() if k in df.columns})
+
+        # --- Lógica de Estado Final (Seguridad) ---
         if 'estado' not in df.columns:
             df = df.with_columns(pl.lit('pendiente').alias('estado'))
         else:
+            # Asegurar que cualquier valor nulo o no mapeado sea 'pendiente'
             df = df.with_columns(pl.col('estado').fill_null('pendiente'))
 
+        # --- Resto del procesamiento ---
         if 'fecha_intervencion' not in df.columns:
             df = df.with_columns(pl.lit(hoy).alias('fecha_intervencion'))
 
         if 'fecha_alta' in df.columns:
             df = df.with_columns(pl.col('fecha_alta').map_elements(normalizar_fecha, return_dtype=pl.Utf8))
 
-        # Asegurar esquema
+        # Asegurar esquema y tipos
         for col, dtype in FINAL_SCHEMA.items():
-            if col not in df.columns: df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
+            if col not in df.columns: 
+                df = df.with_columns(pl.lit(None).cast(dtype).alias(col))
         
         df = df.select([pl.col(c).cast(FINAL_SCHEMA[c]) for c in FINAL_SCHEMA.keys()])
 
+        # Actualizar Session State
         if len(st.session_state.data) > 0:
             st.session_state.data = pl.concat([st.session_state.data, df], how="vertical").unique(subset=['nro_cli'], keep='last')
         else:
             st.session_state.data = df
-        if len(df) == 1:
-            st.success(f"{len(df)} fila procesada.")
-        elif len(df) > 1:
-            st.success(f"{len(df)} filas procesadas.")
-        else:
-            st.warning("El archivo no contiene filas válidas.")
+
+        st.success(f"{len(df)} {'fila procesada' if len(df) == 1 else 'filas procesadas'}.")
         st.rerun()
+
     except Exception as e:
         st.error(f"Error: {e}")
 
