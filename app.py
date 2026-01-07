@@ -113,7 +113,13 @@ def procesar_archivo_inteligente(uploaded_file):
             
         elif nombre.endswith('.ods'):
             with io.BytesIO(raw_content) as bio:
+                # Leemos con pandas
                 pd_df = pd.read_excel(bio, engine='odf')
+                
+                # SOLUCIÓN: Convertir todo el dataframe de pandas a string 
+                # para evitar conflictos de tipos con Arrow/Polars
+                pd_df = pd_df.astype(str).replace('nan', None) 
+                
                 df = pl.from_pandas(pd_df)
 
         # --- Lógica de Mapeo de Columna "X" ---
