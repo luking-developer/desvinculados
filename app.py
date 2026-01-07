@@ -146,7 +146,12 @@ def procesar_archivo_inteligente(uploaded_file):
             st.session_state.data = pl.concat([st.session_state.data, df], how="vertical").unique(subset=['nro_cli'], keep='last')
         else:
             st.session_state.data = df
-        st.success(f"{len(df)} fila procesada.") if len(df) == 1 elif len(df) > 1 st.success(f"{len(df)} filas procesadas.") else st.warning("El archivo no contiene filas válidas.")
+        if len(df) == 1:
+            st.success(f"{len(df)} fila procesada.")
+        elif len(df) > 1:
+            st.success(f"{len(df)} filas procesadas.")
+        else:
+            st.warning("El archivo no contiene filas válidas.")
         st.rerun()
     except Exception as e:
         st.error(f"Error: {e}")
