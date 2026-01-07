@@ -199,7 +199,7 @@ def cargar_db(uploaded_file):
 # 3. INTERFAZ
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Gestor EPE")  # TODO: Agregar icono y cambiar titulo
+st.set_page_config(layout="wide", page_title="Desvinculados EPE", page_icon="⚡")
 if 'data' not in st.session_state: st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
 
 st.title("⚡ EPE - Gestión de Desvinculados")
