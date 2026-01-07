@@ -3,3 +3,4 @@ pandas
 polars
 fastexcel
 python-calamine
+odfpy
