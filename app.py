@@ -146,7 +146,7 @@ def procesar_archivo_inteligente(uploaded_file):
             st.session_state.data = pl.concat([st.session_state.data, df], how="vertical").unique(subset=['nro_cli'], keep='last')
         else:
             st.session_state.data = df
-        st.success(f"Procesado: {len(df)} filas.")
+        st.success(f"{len(df)} fila procesada.") if len(df) == 1 elif len(df) > 1 st.success(f"{len(df)} filas procesadas.") else st.warning("El archivo no contiene filas válidas.")
         st.rerun()
     except Exception as e:
         st.error(f"Error: {e}")
@@ -194,7 +194,7 @@ def cargar_db(uploaded_file):
 # 3. INTERFAZ
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Gestor EPE")
+st.set_page_config(layout="wide", page_title="Gestor EPE")  # TODO: Agregar icono y cambiar titulo
 if 'data' not in st.session_state: st.session_state.data = pl.DataFrame({}, schema=FINAL_SCHEMA)
 
 st.title("⚡ EPE - Gestión de Desvinculados")
